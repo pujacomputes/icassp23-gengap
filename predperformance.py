@@ -208,29 +208,19 @@ def main():
     np.random.seed(args.seed)
     random.seed(args.seed)
 
-    # """
-    # Create model and pretrainined checkpoint
-    # """
-    # net = load_model(args=args,ckpt=args.ckpt[0])
+    net = load_model(args,args.ckpt[0])
     use_clip_mean = "clip" in args.arch
-    # net = torch.nn.DataParallel(net).cuda()
-    # torch.backends.cudnn.benchmark = True 
     
-    # print("=> Num GPUS: ", torch.cuda.device_count())
-    # safety_logs_prefix = ("/usr/workspace/trivedi1/Fall2022/icassp23-gengap/pred_logs/")
-    # save_name = args.save_name
-    # print("=> Save Name: ", save_name) 
-    
-    # """
-    # Get Datasets
-    # """
+    """
+    Get Datasets
+    """
     train_transform = get_transform(
         dataset=args.dataset, SELECTED_AUG="test", use_clip_mean=use_clip_mean
     )
     test_transform = get_transform(
         dataset=args.dataset, SELECTED_AUG="test", use_clip_mean=use_clip_mean
     )
-    clean_train_loader, clean_test_loader = get_dataloaders(
+    _, clean_test_loader = get_dataloaders(
         args=args,
         train_aug="test",
         test_aug="test",
@@ -239,9 +229,9 @@ def main():
         use_clip_mean=use_clip_mean,
     )
 
-    # """
-    # Load the evaluation dataset
-    # """
+    """
+    Load the evaluation dataset
+    """
     _, clean_test_dataset_c = get_dataloaders(
                 args=args,
                 train_aug="test",
@@ -257,12 +247,13 @@ def main():
         severity = args.severity,
         clean_test_dataset=clean_test_dataset_c)
     print("=> DONE LOADING ALL DATASETS") 
-    # _, clean_acc = test(net=net, test_loader=clean_train_loader, adv=None)
+    _, id_acc = test(net=net, test_loader=clean_test_loader, adv=None)
     # _, target_acc = test(net=net, test_loader=target_loader, adv=None)
     # print("=> Clean Acc: ",clean_acc)
     # print("=> Target Acc: ",target_acc)
 
     if args.predictor.lower() == "lms":
+        majority_criteria = 0.5
         #use local manifold smoothing.
         """
         Change the target dataloader so that randaugment is applied.
@@ -280,7 +271,7 @@ def main():
                 use_clip_mean=use_clip_mean,
                 return_datasets=True,
         )
-        target_loader = get_calibration_loader(args=args, 
+        target_loader_randaug = get_calibration_loader(args=args, 
             cal_dataset = args.target_dataset, 
             corruption =args.corruption, 
             severity = args.severity,
@@ -294,35 +285,117 @@ def main():
         lms_preds = torch.zeros(args.num_augs,len(target_loader.dataset)) 
         target_list = []
         start_time = time.time()
+        print()
+        print("=> Begin LMS on Target Dist.")
         with torch.no_grad():
             for enum in range(args.num_augs):
                 counter = 0
-                for images, targets in target_loader:
+                for images, targets in target_loader_randaug:
                     images, targets = images.cuda(), targets.cuda()
                     num_samples = len(targets)
                     lms_preds[enum,counter:counter+num_samples]= net(images).data.max(1)[1].cpu() 
                     counter += num_samples 
                     if enum == 0:
                         target_list.append(targets)
-                print("Collected Augs: ",enum,counter, len(target_list),np.round(time.time() - start_time,3))
+                print("({0}) Target Dist, Collected Augs: {1}".format(np.round(time.time() - start_time,3),enum))
             target_list = torch.cat(target_list).cpu()
+        print()
         """
         Compute Agreement over Augmentations
         """
-        vals, counts = mode(lms_preds,axis=0) 
-        vals = vals.squeeze()
-        counts = counts.squeeze()
-        scores = counts / args.num_augs 
-        total_correct = torch.Tensor(vals).eq(target_list).sum().item()
-        acc = total_correct / target_list.shape[0]
-        print("=> Target Acc: ", acc) 
-        print("=> Avg Smoothness: ",scores.mean())
+        target_vals, target_counts = mode(lms_preds,axis=0) 
+        target_vals = target_vals.squeeze()
+        target_counts = target_counts.squeeze()
+        target_scores = target_counts / args.num_augs
+
+        """
+        Compute threshold value over the training distribution.
+        """
+        _, id_loader_randaug= get_dataloaders(
+            args=args,
+            train_aug="test",
+            test_aug="randaug",
+            train_transform=train_transform,
+            test_transform=lms_transform,
+            use_clip_mean=use_clip_mean,
+        )        
+
+        net.eval()
+        id_lms_preds = torch.zeros(args.num_augs,len(id_loader_randaug.dataset)) 
+        id_target_list = []
+        start_time = time.time()
+        print("=> Begin IN DIST LMS")
+        with torch.no_grad():
+            for enum in range(args.num_augs):
+                counter = 0
+                for images, targets in id_loader_randaug:
+                    images, targets = images.cuda(), targets.cuda()
+                    num_samples = len(targets)
+                    id_lms_preds[enum,counter:counter+num_samples]= net(images).data.max(1)[1].cpu() 
+                    counter += num_samples 
+                    if enum == 0:
+                        id_target_list.append(targets)
+                print("({0}) In Dist, Collected Augs: {1}".format(np.round(time.time() - start_time,3),enum))
+            id_target_list = torch.cat(id_target_list).cpu()
+
+        id_vals, id_counts = mode(id_lms_preds,axis=0) 
+        id_vals = id_vals.squeeze()
+        id_counts = id_counts.squeeze()
+        id_scores = id_counts / args.num_augs
+
+        """
+        Compute the threshold
+        """
+        thresholds = np.arange(0, 1, 1/args.num_augs) 
+        acc_at_thres = []
+        for thres in thresholds:
+            acc_at_thres.append((id_scores >= thres).sum() / len(id_scores))
+        idx = np.abs(np.array(acc_at_thres) - id_acc).argmin()
+        found_thres = np.round(thresholds[idx],4)
+        print("=> Optimal Thres: {0} , ID Thres Acc: {1:.3f}, True ID Acc: {2:.3f}".format(thresholds[idx],acc_at_thres[idx],id_acc))
         
-        file_name = "{prefix}/{method}_{save_name}_{seed}".format(prefix=LOG_PREFIX,
+        """
+        Get predictions on UNAUGMENTED TARGET Distribution
+        """
+        target_preds, target_acc = get_probs(model=net, loader=target_loader)
+        target_preds = target_preds.argmax(1)
+        target_ground_truth = target_preds.eq(target_loader.dataset.targets)
+        
+        # WE ALSO GET THE GROUND TRUTH FROM THE MAJORITY CLASS OVER AUGMENTATIONS
+        target_voting_ground_truth = torch.Tensor(target_vals).eq(target_loader.dataset.targets)
+        target_voting_acc = target_voting_ground_truth.sum() / len(target_loader.dataset.targets)
+        
+        """
+        PREDICTING ACCURACY ON TARGET DATASET 
+        """
+        pred_target_acc = (target_scores >= found_thres).sum() / len(target_scores)
+        pred_target_acc_majority = (target_scores >= majority_criteria).sum() / len(target_scores)
+
+        print("True Target Acc: {0:.3f} -- True Voting Acc: {1:.3f} -- Predict LMS Acc Thres : {2:.3f} -- Predict LMS Acc Maj: {3:.3f}".format(target_acc,target_voting_acc,pred_target_acc,pred_target_acc_majority))
+        
+        """
+        Save the scores. 
+        """
+        header_dict ={
+            "thres":found_thres,
+            "pred_target_acc":np.round(pred_target_acc.item(),4),
+            "pred_voting_acc":np.round(target_voting_acc.item(),4),
+            "target_acc":np.round(target_acc,4),
+            "target_dataset":args.target_dataset,
+            "corruption":args.corruption,
+            "severity":args.severity
+        } 
+        arr = np.column_stack((target_scores, target_scores >= found_thres, target_ground_truth,target_preds, target_loader.dataset.targets,target_vals))
+        file_name = "{prefix}/{method}_{save_name}_{seed}.txt".format(prefix=LOG_PREFIX,
             save_name=args.save_name, 
             seed=args.seed,
             method=args.predictor)
-        np.savetxt(file_name,X=scores,delimiter=",",fmt="%.4f")
+        print("Saving LMS Scores!")
+        print("File Name: {0}".format(file_name))
+        print("Arr Size: ",arr.shape)
+        header_str = json.dumps(header_dict)
+        np.savetxt(file_name,X=arr,delimiter=",",fmt="%.4f",header=header_str)
+
     elif args.predictor.lower() == "doc":
         #use differences of confidences.
         net = load_model(args,args.ckpt[0]) 
@@ -330,7 +403,7 @@ def main():
         id_confs = id_probs.max(dim=1)[0]
         id_preds = id_probs.argmax(dim=1)
         
-        target_probs ,acc  = get_probs(model=net,loader=target_loader)
+        target_probs ,target_acc  = get_probs(model=net,loader=target_loader)
         scores = target_confs = target_probs.max(dim=1)[0]
         target_preds = target_probs.argmax(dim=1)
         target_ground_truth = target_preds.eq(target_loader.dataset.targets) 
@@ -344,9 +417,9 @@ def main():
             acc_at_thres.append((id_confs >= thres).sum() / len(id_confs))
         idx = np.abs(np.array(acc_at_thres) - acc).argmin()
         found_thres = thresholds[idx]
-        target_acc = (target_confs >= found_thres).sum() / len(target_confs)
+        pred_target_acc = (target_confs >= found_thres).sum() / len(target_confs)
         print("=> Optimal Thres: {0} , ID Thres Acc: {1:.3f}, True ID Acc: {2:.3f}".format(thresholds[idx],acc_at_thres[idx],acc))
-        print("Target Acc: ",target_acc) 
+        print("=> True Target Acc: {0:.3f} -- Pred Target Acc: {1:.3f}".format(target_acc,pred_target_acc)) 
         
         """
         Save Score and relevant info to txt.
@@ -363,7 +436,8 @@ def main():
 
         header_dict ={
             "thres":found_thres,
-            "target_acc":np.round(target_acc.item(),4),
+            "pred_target_acc":np.round(pred_target_acc.item(),4),
+            "true_target_acc":np.round(target_acc,4),
             "target_dataset":args.target_dataset,
             "corruption":args.corruption,
             "severity":args.severity
@@ -372,6 +446,9 @@ def main():
         np.savetxt(file_name,X=arr,delimiter=",",fmt="%.4f",header=header_str)
 
     elif args.predictor.lower() == "ens":
+        if len(args.ckpt) < 2:
+            print("ONLY 1 MODEL PASSED. NOT AN ENSEMBLE. EXITING")
+            exit()
         num_models = len(args.ckpt)
         majority_criteria = num_models // 2
         print("=> Computing Ens Disagreement over {0} models!".format(num_models))
@@ -388,6 +465,8 @@ def main():
         3. Compute the mode.
         4. Get Accuracy and Scores  
         """
+        print()
+        print("=> Computing TARGET DIST Scores ")
         ens_preds = torch.zeros(num_models,len(target_loader.dataset)) 
         target_list = []
         start_time = time.time()
@@ -395,7 +474,7 @@ def main():
             for enum in range(num_models):
                 counter = 0
                 total_correct = 0
-                for images, targets in tqdm(target_loader,disable=False):
+                for images, targets in tqdm(target_loader,disable=True):
                     images, targets = images.cuda(), targets.cuda()
                     num_samples = len(targets)
 
@@ -411,21 +490,91 @@ def main():
         """
         Compute Agreement over Augmentations
         """
-        vals, counts = mode(ens_preds,axis=0) 
-        vals = vals.squeeze()
-        counts = counts.squeeze()
+        target_vals, target_counts = mode(ens_preds,axis=0) 
+        target_vals = target_vals.squeeze()
+        target_counts = target_counts.squeeze()
+        target_scores = target_counts / num_models
 
         """
-        Disagreement rate
+        Compute In-Distribution Disagreements to get Threshold
         """
-        num_disagreements = len(counts[counts <= majority_criteria]) #number of times models did not agree
-        print("=> Num Disagreements! ",num_disagreements)
-        ens_probs = counts / num_models #probability of top most class 
-        total_correct = torch.Tensor(vals).eq(target_list).sum().item()
-        acc = 1 - (num_disagreements / target_list.shape[0])
-        print("=> Estimated Target Acc: ", acc) 
-        print("=> Ens. Probability : ",ens_probs.mean()) 
+        print()
+        print("=> Computing ID DIST Scores ")
+        id_preds = torch.zeros(num_models,len(clean_test_loader.dataset)) 
+        id_target_list = []
+        start_time = time.time()
+        with torch.no_grad():
+            for enum in range(num_models):
+                counter = 0
+                total_correct = 0
+                for images, targets in tqdm(clean_test_loader,disable=True):
+                    images, targets = images.cuda(), targets.cuda()
+                    num_samples = len(targets)
+                    pred =  model_list[enum](images).data.max(1)[1]
+                    total_correct += pred.eq(targets.data).sum().item()
+                    id_preds[enum,counter:counter+num_samples]= pred.cpu() 
+                    counter += num_samples 
+                    if enum == 0:
+                        id_target_list.append(targets)
+                acc_tmp = total_correct / len(clean_test_loader.dataset) 
+                print("({0}) Collected Models: {1} -- Target List: {2} -- Acc: {3:.3f}".format(np.round(time.time() - start_time,3), enum,counter,acc_tmp))
+            id_target_list = torch.cat(id_target_list).cpu()
+        
+        id_vals, id_counts = mode(id_preds,axis=0) 
+        id_vals = id_vals.squeeze()
+        id_counts = id_counts.squeeze()
+        id_scores = id_counts / num_models
     
+        """
+        Compute the threshold
+        """
+        print('=> Computing Threshold')
+        thresholds = np.arange(0, 1, 1/num_models) 
+        acc_at_thres = []
+        for thres in thresholds:
+            acc_at_thres.append((id_scores >= thres).sum() / len(id_scores))
+        idx = np.abs(np.array(acc_at_thres) - id_acc).argmin()
+        found_thres = np.round(thresholds[idx],4)
+        print("=> Optimal Thres: {0} , ID Thres Acc: {1:.3f}, True ID Acc: {2:.3f}".format(thresholds[idx],acc_at_thres[idx],id_acc))
+        
+        """
+        Get the predicted TARGET DIST ACC using the threshold.
+        """
+        num_disagreements_thres = len(target_scores[target_scores >= found_thres]) #number of times models did not agree
+        num_disagreements = len(target_scores [target_scores <= (majority_criteria/num_models)]) #number of times models did not agree
+        
+        print("=> Num Disagreements (Majority)!: ",num_disagreements, 1-(num_disagreements/len(target_list)))
+        print("=> Num Disagreements (Threshold)! ",num_disagreements_thres)
+        
+        target_ground_truth = torch.Tensor(target_vals).eq(target_list)
+        target_acc = target_ground_truth.sum().item() / len(target_list)
+        pred_target_acc = 1 - (num_disagreements / target_list.shape[0])
+        pred_target_acc_thres = (num_disagreements_thres / target_list.shape[0])
+        print("True Target Acc: {0:.3f} -- Pred Thres Acc: {1:.3f} -- Pred Majority Acc: {2:.3f}".format(target_acc,pred_target_acc_thres,pred_target_acc))
+
+        """
+        Save Score and relevant info to txt.
+        """ 
+        file_name = "{prefix}/{method}_{save_name}_{seed}.txt".format(prefix=LOG_PREFIX,
+            save_name=args.save_name, 
+            seed=args.seed,
+            method=args.predictor)
+        #scores, predicted as correct, ground_truth_is_correct_pred, predicted_class, ground_truth_class
+        arr = np.column_stack((target_scores, target_scores >= found_thres, target_ground_truth,target_vals, target_list))
+        print("Saving Ens Scores!")
+        print("File Name: {0}".format(file_name))
+        print("Arr Size: ",arr.shape)
+
+        header_dict ={
+            "thres":found_thres,
+            "pred_target_acc":np.round(pred_target_acc_thres,4),
+            "true_target_acc":np.round(target_acc,4),
+            "target_dataset":args.target_dataset,
+            "corruption":args.corruption,
+            "severity":args.severity
+        }
+        header_str = json.dumps(header_dict)
+        np.savetxt(file_name,X=arr,delimiter=",",fmt="%.4f",header=header_str) 
     else:
         print("INVALID PREDICTOR SPECIFIED. EXITING")
         exit()
