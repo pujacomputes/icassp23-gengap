@@ -1187,10 +1187,21 @@ def get_calibration_loader(
             Load cifar10-c
             """
             corruption_path = "/usr/workspace/trivedi1/vision_data/CIFAR-10-C/"
-            clean_test_dataset.data = np.load(corruption_path + corruption + ".npy")
-            clean_test_dataset.targets = torch.LongTensor(
-                np.load(corruption_path + "labels.npy")
-            )
+            if severity != -1:
+                #we will compute the scores over each severity separately.
+                #so we index the orginal cifar-10-c np files
+                start_idx = (severity-1)*10000
+                end_idx = ((severity-1)+1)*10000
+                print("=> Severity: {} , start idx: {}, end idx: {}".format(severity,start_idx,end_idx))
+                clean_test_dataset.data = np.load(corruption_path + corruption + ".npy")[start_idx:end_idx,:]
+                clean_test_dataset.targets = torch.LongTensor(
+                    np.load(corruption_path + "labels.npy")
+                )[start_idx:end_idx]
+            else:
+                clean_test_dataset.data = np.load(corruption_path + corruption + ".npy")
+                clean_test_dataset.targets = torch.LongTensor(
+                    np.load(corruption_path + "labels.npy")
+                )
             clean_test_loader = torch.utils.data.DataLoader(
                 clean_test_dataset,
                 batch_size=args.eval_batch_size,

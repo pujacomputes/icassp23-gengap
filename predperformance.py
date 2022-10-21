@@ -43,6 +43,7 @@ from utils import (
     norm_dict,
     get_calibration_loader,
 )
+import json
 from scipy.stats import mode
 from sklearn import metrics
 
@@ -99,31 +100,6 @@ def test(net, test_loader, adv=None):
             total_loss += float(loss.data)
             total_correct += pred.eq(targets.data).sum().item()
     return total_loss / len(test_loader), total_correct / len(test_loader.dataset)
-
-def test_c_domainnet(net, args):
-    """Evaluate network on given corrupted dataset."""
-    use_clip_mean = "clip" in args.arch.lower()
-    print("=> Use Clip Mean?: ", use_clip_mean)
-    corruption_accs = []
-    corrs = CBAR_CORRUPTIONS if "Bar" in args.corruption_path else CORRUPTIONS
-    for corruption in corrs:
-        for sev in range(1, 6):
-            corrupted_loader = get_corrupted_loader(
-                args,
-                dataset="domainnet-sketch",
-                corruption_name=corruption,
-                severity=sev,
-                use_clip_mean=use_clip_mean,
-            )
-
-            test_loss, test_acc = test(net, corrupted_loader)
-            corruption_accs.append(test_acc)
-            print(
-                "{},{}\tTest Loss {:.3f} | Test Error {:.3f}".format(
-                    corruption, sev, test_loss, 100 - 100.0 * test_acc
-                )
-            )
-    return np.mean(corruption_accs)
 
 def load_dp_ckpt(model, pretrained_ckpt):
     ckpt = torch.load(pretrained_ckpt)
@@ -342,8 +318,11 @@ def main():
         print("=> Target Acc: ", acc) 
         print("=> Avg Smoothness: ",scores.mean())
         
-        file_name = "{prefix}/{save_name}_{seed}".format(prefix=)
-
+        file_name = "{prefix}/{method}_{save_name}_{seed}".format(prefix=LOG_PREFIX,
+            save_name=args.save_name, 
+            seed=args.seed,
+            method=args.predictor)
+        np.savetxt(file_name,X=scores,delimiter=",",fmt="%.4f")
     elif args.predictor.lower() == "doc":
         #use differences of confidences.
         net = load_model(args,args.ckpt[0]) 
@@ -351,11 +330,13 @@ def main():
         id_confs = id_probs.max(dim=1)[0]
         id_preds = id_probs.argmax(dim=1)
         
-        ood_probs ,acc  = get_probs(model=net,loader=target_loader)
-        ood_confs = ood_probs.max(dim=1)[0]
-
+        target_probs ,acc  = get_probs(model=net,loader=target_loader)
+        scores = target_confs = target_probs.max(dim=1)[0]
+        target_preds = target_probs.argmax(dim=1)
+        target_ground_truth = target_preds.eq(target_loader.dataset.targets) 
+        
         """
-        get the idx that are greater than thres
+        Compute the threshold
         """
         thresholds = np.arange(0, 1, 0.001) 
         acc_at_thres = []
@@ -363,16 +344,41 @@ def main():
             acc_at_thres.append((id_confs >= thres).sum() / len(id_confs))
         idx = np.abs(np.array(acc_at_thres) - acc).argmin()
         found_thres = thresholds[idx]
+        target_acc = (target_confs >= found_thres).sum() / len(target_confs)
         print("=> Optimal Thres: {0} , ID Thres Acc: {1:.3f}, True ID Acc: {2:.3f}".format(thresholds[idx],acc_at_thres[idx],acc))
-        print("Target Acc: ",(ood_confs >= found_thres).sum() / len(ood_confs)) 
+        print("Target Acc: ",target_acc) 
+        
+        """
+        Save Score and relevant info to txt.
+        """ 
+        file_name = "{prefix}/{method}_{save_name}_{seed}.txt".format(prefix=LOG_PREFIX,
+            save_name=args.save_name, 
+            seed=args.seed,
+            method=args.predictor)
+        #scores, predicted as correct, ground_truth_is_correct_pred, predicted_class, ground_truth_class
+        arr = np.column_stack((scores, target_confs >= found_thres, target_ground_truth,target_preds, target_loader.dataset.targets))
+        print("Saving DOC Scores!")
+        print("File Name: {0}".format(file_name))
+        print("Arr Size: ",arr.shape)
+
+        header_dict ={
+            "thres":found_thres,
+            "target_acc":np.round(target_acc.item(),4),
+            "target_dataset":args.target_dataset,
+            "corruption":args.corruption,
+            "severity":args.severity
+        }
+        header_str = json.dumps(header_dict)
+        np.savetxt(file_name,X=arr,delimiter=",",fmt="%.4f",header=header_str)
 
     elif args.predictor.lower() == "ens":
         num_models = len(args.ckpt)
         majority_criteria = num_models // 2
         print("=> Computing Ens Disagreement over {0} models!".format(num_models))
         print("=> Pls use 2 models or an odd number for now....")
-        print("=> To be consider in `agreement` more than {}/{} must match!".format(majority_criteria,num_models))
+        print("=> To be considered in `agreement` more than {}/{} must match!".format(majority_criteria,num_models))
         model_list = [load_model(args,ckpt) for ckpt in args.ckpt]
+        
         """
         Generally, GDE is computed with just 2 models.
         But a trivial extension consider the ensemble in disagreement if the "majority" do not agree.
@@ -382,7 +388,6 @@ def main():
         3. Compute the mode.
         4. Get Accuracy and Scores  
         """
-
         ens_preds = torch.zeros(num_models,len(target_loader.dataset)) 
         target_list = []
         start_time = time.time()
