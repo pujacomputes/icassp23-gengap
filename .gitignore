@@ -1,0 +1,7 @@
+/.vscode
+/__pycache__
+/ckpts
+/logs
+/pred_logs
+/scripts
+/temp_ckpts
