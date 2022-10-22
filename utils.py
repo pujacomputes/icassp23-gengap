@@ -1,4 +1,5 @@
 import argparse
+import pdb
 import random
 import numpy as np
 import tqdm
@@ -17,6 +18,7 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 NUM_CLASSES_DICT = {
     "cifar10": 10,
+    "cifar10ln": 10,
     "cifar100": 100,
     "living17": 17,
     "entity30": 30,
@@ -36,6 +38,8 @@ NUM_CLASSES_DICT = {
 norm_dict = {
     "cifar10_mean": [0.485, 0.456, 0.406],
     "cifar10_std": [0.228, 0.224, 0.225],
+    "cifar10ln_mean": [0.485, 0.456, 0.406],
+    "cifar10ln_std": [0.228, 0.224, 0.225],
     "mnist_mean": [0.485, 0.456, 0.406],
     "mnist_std": [0.228, 0.224, 0.225],
     "living17_mean": [0.485, 0.456, 0.406],
@@ -431,6 +435,22 @@ def get_dataloaders(
                 train=True,
                 transform=train_transform,
             )
+        elif args.dataset == "cifar10ln":
+            train_dataset = torchvision.datasets.CIFAR10(
+                root="/p/lustre1/trivedi1/vision_data",
+                train=True,
+                transform=train_transform,
+            )
+            """
+            We are going to replace some of the targets with wrong labels
+            """
+            targets = np.array(train_dataset.targets)
+            num_relabel = int(len(targets) * args.label_noise)
+            print("=> RELABELING ~ ",num_relabel)
+            relabel_idx = np.random.choice(a=np.arange(len(targets)),size=num_relabel,replace=False) 
+            relabel_labels = np.random.choice(a=np.arange(10),size=num_relabel,replace=True)
+            targets[relabel_idx] = relabel_labels
+            train_dataset.targets = targets.tolist() 
         elif args.dataset == "cifar100":
             train_dataset = torchvision.datasets.CIFAR100(
                 root="/p/lustre1/trivedi1/vision_data",
@@ -504,6 +524,22 @@ def get_dataloaders(
             train_dataset = torchvision.datasets.CIFAR10(
                 root="/p/lustre1/trivedi1/vision_data", train=True, transform=normalize
             )
+        elif args.dataset == "cifar10ln":
+            train_dataset = torchvision.datasets.CIFAR10(
+                root="/p/lustre1/trivedi1/vision_data",
+                train=True,
+                transform=train_transform,
+            )
+            """
+            We are going to replace some of the targets with wrong labels
+            """
+            targets = np.array(train_dataset.targets)
+            num_relabel = int(len(targets) * args.label_noise)
+            print("=> RELABELING ~ ",num_relabel)
+            relabel_idx = np.random.choice(a=np.arange(len(targets)),size=num_relabel,replace=False) 
+            relabel_labels = np.random.choice(a=np.arange(10),size=num_relabel,replace=True)
+            targets[relabel_idx] = relabel_labels
+            train_dataset.targets = targets.tolist() 
         elif args.dataset == "cifar100":
             train_dataset = torchvision.datasets.CIFAR100(
                 root="/p/lustre1/trivedi1/vision_data", train=True, transform=normalize
@@ -553,7 +589,7 @@ def get_dataloaders(
     """
     Create Test Dataloaders.
     """
-    if args.dataset == "cifar10":
+    if args.dataset == "cifar10" or args.dataset  == 'cifar10ln':
         test_dataset = torchvision.datasets.CIFAR10(
             root="/p/lustre1/trivedi1/vision_data",
             train=False,
@@ -703,6 +739,7 @@ def arg_parser():
         default="cifar10",
         choices=[
             "cifar10",
+            "cifar10ln",
             "domainnet-sketch",
             "cifar100",
             "pairedCIFAR",
@@ -910,6 +947,8 @@ def arg_parser():
     parser.add_argument(
         "--num_cls", type=int, default=20, help="How many cls in soup"
     )
+    
+    parser.add_argument("--label_noise", type=float, default=0.055, help="How many samples have wrong labels.")
     args = parser.parse_args()
     return args
 

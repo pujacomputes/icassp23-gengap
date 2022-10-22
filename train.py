@@ -154,7 +154,11 @@ def main():
             net = ClipModel(model_name=encoder_type,scratch=False)
     use_clip_mean = "clip" in args.arch 
     lp_aug_name = args.train_aug
-    save_name =  args.dataset \
+    if "ln" in args.dataset:
+        dataset_name = "{}-{}".format(args.dataset, args.label_noise)
+    else:
+        dataset_name = args.dataset 
+    save_name =  dataset_name \
         + '_' + args.arch \
         + "_" + args.ft_train_aug \
         + "_" + str(args.ft_epochs) \

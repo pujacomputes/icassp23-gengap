@@ -45,7 +45,7 @@ from utils import (
 )
 import json
 from scipy.stats import mode
-from sklearn import metrics
+from sklearn.metrics import mean_squared_error, mean_absolute_error
 
 LOG_PREFIX="/usr/workspace/trivedi1/Fall2022/icassp23-gengap/pred_logs"
 def get_probs(model, loader): 
@@ -136,7 +136,7 @@ def arg_parser_eval():
         "--predictor",
         type=str,
         default="lms",
-        choices=["lms", "doc", "ens", "mmd"],
+        choices=["lms", "doc", "ens", "mmd",'voting'],
         help="Specify the type of predictor",
     )
     parser.add_argument(
@@ -194,6 +194,57 @@ def load_model(args,ckpt):
     net.eval()
     return net
 
+def perform_voting(model_list, loader):
+    """
+    Get predictions
+    """
+    with torch.no_grad():
+        predictions = [[] for  _ in model_list]
+        for x, y in loader:
+            x = x.cuda()
+            y = y.cuda()
+            for enum, m in enumerate(model_list):
+                pred = m(x).argmax(1)
+                predictions[enum].append(pred)
+        for enum, p in enumerate(predictions):
+            predictions[enum] = torch.cat(p)
+        predictions = torch.stack(predictions).cpu().numpy()  # num models x n
+
+    """
+    Vote on predictions
+    """
+    pred_acc_mtrx = np.zeros(len(model_list))
+    true_acc_mtrx = np.zeros(len(model_list))
+    gde_scores = [[] for _ in range(len(model_list))]
+    for s_num,_ in enumerate(model_list):
+        #s_num is the held-out model
+        #sub_idx contains the model idx used for voting
+        sub_idx = [i for i,_ in enumerate(model_list) if i != s_num]
+        votes = mode(predictions[sub_idx, :], axis=0)[0].reshape(-1)
+        base_preds = predictions[s_num]
+        disagreements = base_preds == votes #disagreement over n-1 
+        gde_scores[s_num] = disagreements
+        predicted_acc = (disagreements.sum()) / disagreements.shape[0]
+        _, true_acc = test(model_list[s_num], loader)
+        pred_acc_mtrx[s_num] = predicted_acc
+        true_acc_mtrx[s_num] = true_acc
+    true_acc_mtrx = true_acc_mtrx.reshape(-1,1)
+    pred_acc_mtrx = pred_acc_mtrx.reshape(-1,1)
+    MSE = mean_squared_error(y_true=true_acc_mtrx,y_pred=pred_acc_mtrx)
+    MAE = mean_absolute_error(y_true=true_acc_mtrx,y_pred=pred_acc_mtrx)
+    avg_pred_acc = pred_acc_mtrx.mean()
+    avg_true_acc = true_acc_mtrx.mean()
+    print("=> Avg Pred Acc: ",avg_pred_acc)
+    print("=> Avg True Acc: ",avg_true_acc)
+
+    """
+    We will average the round-robin disagreement 
+    scores to get a better score for each sample.
+    """
+    gde_scores = np.stack(gde_scores) #num models x num_samples
+    return gde_scores, MSE, MAE, pred_acc_mtrx, true_acc_mtrx
+
+
 def main():
     """
     Load the saved checkpoint.
@@ -248,6 +299,7 @@ def main():
         clean_test_dataset=clean_test_dataset_c)
     print("=> DONE LOADING ALL DATASETS") 
     _, id_acc = test(net=net, test_loader=clean_test_loader, adv=None)
+    _, target_acc = test(net=net, test_loader=target_loader, adv=None)
 
     if args.predictor.lower() == "lms":
         majority_criteria = 0.5
@@ -610,7 +662,109 @@ def main():
             "severity":args.severity
         }
         header_str = json.dumps(header_dict)
+        np.savetxt(file_name,X=arr,delimiter=",",fmt="%.4f",header=header_str)
+
+    elif args.predictor.lower() == "voting":
+        """
+        This is different that GDE. 
+        We do a round robin if there are more than 2 models.
+        """
+        if len(args.ckpt) < 2:
+            print("ONLY 1 MODEL PASSED. NOT AN ENSEMBLE. EXITING")
+            exit()
+        num_models = len(args.ckpt)
+        majority_criteria = num_models // 2
+        model_list = [load_model(args,ckpt) for ckpt in args.ckpt]
+        
+        print()
+        print("=> Computing TARGET DIST Scores ")
+        start_time = time.time()
+        target_disagreements, MSE, MAE, pred_acc_mtrx, true_acc_mtrx = perform_voting(model_list=model_list,loader=target_loader)
+        target_acc = np.mean(true_acc_mtrx)
+        """
+        Compute Agreement over Augmentations
+        """
+        target_vals, target_counts = mode(target_disagreements,axis=0) 
+        target_vals = target_vals.squeeze()
+        target_counts = target_counts.squeeze()
+        target_scores = target_counts / num_models
+        target_means = np.mean(target_disagreements,axis=0) 
+
+        """
+        Compute In-Distribution Disagreements to get Threshold
+        """
+        print()
+        print("=> Computing ID DIST Scores ")
+        id_disagreements, MSE, MAE, pred_acc_mtrx, true_acc_mtrx = perform_voting(model_list=model_list,loader=clean_test_loader) 
+        id_vals, id_counts = mode(id_disagreements,axis=0) 
+        id_vals = id_vals.squeeze()
+        id_counts = id_counts.squeeze()
+        id_scores = id_counts / num_models
+        id_means = np.mean(id_disagreements,axis=0) 
+        """
+        Compute the threshold
+        """
+        print('=> Computing Threshold')
+        thresholds = np.arange(0, 1, 1/num_models) 
+        acc_at_thres = []
+        for thres in thresholds:
+            acc_at_thres.append((id_means >= thres).sum() / len(id_scores))
+        idx = np.abs(np.array(acc_at_thres) - id_acc).argmin()
+        found_thres = np.round(thresholds[idx],4)
+        print("=> Optimal Thres: {0} , ID Thres Acc: {1:.3f}, True ID Acc: {2:.3f}".format(found_thres,acc_at_thres[idx],id_acc))
+        
+        """
+        Get the predicted TARGET DIST ACC using the threshold.
+        """
+        target_scores = np.round(target_scores,4)
+        num_disagreements_thres = len(target_means[target_means >= found_thres]) #number of times models did not agree
+        num_disagreements = len(target_means[target_means <= (majority_criteria/num_models)]) #number of times models did not agree
+        target_list = target_loader.dataset.targets
+        print("=> Num Disagreements (Majority)!: ",num_disagreements, 1-(num_disagreements/len(target_list)))
+        print("=> Num Disagreements (Threshold)! ",num_disagreements_thres)
+        
+        target_ground_truth = torch.Tensor(target_vals).eq(target_list)
+        pred_target_acc = 1 - (num_disagreements / target_list.shape[0])
+        pred_target_acc_thres = (num_disagreements_thres / target_list.shape[0])
+        print("True Target Acc: {0:.3f} -- Pred Thres Acc: {1:.3f} -- Pred Majority Acc: {2:.3f}".format(target_acc,pred_target_acc_thres,pred_target_acc))
+
+        """
+        Save Score and relevant info to txt.
+        """ 
+        consolidated_log_path ="/usr/workspace/trivedi1/Fall2022/icassp23-gengap/pred_logs/consolidated.csv"
+        save_name = "{method}_{save_name}_{corruption}_{severity}_{seed}".format(save_name=args.save_name,
+            corruption=args.corruption,
+            severity=args.severity, 
+            seed=args.seed,
+            method=args.predictor)
+        save_str = "{save_name},{true_target_acc:.4f},{pred_target_acc:.4f}\n".format(save_name=save_name,true_target_acc=target_acc, pred_target_acc=pred_target_acc)
+        with open(consolidated_log_path, "a") as f:
+            f.write(save_str)
+
+        file_name = "{prefix}/{method}_{save_name}_{corruption}_{severity}_{seed}.txt".format(prefix=LOG_PREFIX,
+            save_name=args.save_name,
+            corruption=args.corruption,
+            severity=args.severity, 
+            seed=args.seed,
+            method=args.predictor)
+        #scores, predicted as correct, ground_truth_is_correct_pred, predicted_class, ground_truth_class
+        #arr = np.column_stack((target_scores, target_scores >= found_thres, target_ground_truth,target_vals, target_list))
+        arr = np.column_stack((target_means, target_means >= found_thres, target_ground_truth,target_vals, target_list))
+        print("Saving Ens Scores!")
+        print("File Name: {0}".format(file_name))
+        print("Arr Size: ",arr.shape)
+
+        header_dict ={
+            "thres":found_thres,
+            "pred_target_acc":np.round(pred_target_acc_thres,4),
+            "true_target_acc":np.round(target_acc,4),
+            "target_dataset":args.target_dataset,
+            "corruption":args.corruption,
+            "severity":args.severity
+        }
+        header_str = json.dumps(header_dict)
         np.savetxt(file_name,X=arr,delimiter=",",fmt="%.4f",header=header_str) 
+    
     else:
         print("INVALID PREDICTOR SPECIFIED. EXITING")
         exit()
