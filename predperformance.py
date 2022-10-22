@@ -136,7 +136,7 @@ def arg_parser_eval():
         "--predictor",
         type=str,
         default="lms",
-        choices=["lms", "doc", "ens", "mmd",'voting'],
+        choices=["lms", "doc", "ens", "mmd",'voting','voting_v2'],
         help="Specify the type of predictor",
     )
     parser.add_argument(
@@ -172,6 +172,7 @@ def arg_parser_eval():
     )
     parser.add_argument("--corruption", default="gaussian_blur", type=str, help="corruption name, Used for Getting CIFAR10-C")
     parser.add_argument("--severity", default=5, type=int, help="severity, Used for Getting CIFAR10-C")
+    parser.add_argument("--base_idx", default=0, type=int, help="Hold out model for GDE")
     args = parser.parse_args()
     return args
 
@@ -244,6 +245,52 @@ def perform_voting(model_list, loader):
     gde_scores = np.stack(gde_scores) #num models x num_samples
     return gde_scores, MSE, MAE, pred_acc_mtrx, true_acc_mtrx
 
+
+def perform_voting_one_vs_one(model_list, loader,base_model_idx=0):
+    """
+    Get predictions.
+    We treat one model as the pretrained model.
+    All other models are considered the "check" members of the ensemble.
+    We will compute the GDE score with each check member separately.
+    We then average the disagreement scores to compute a threshold.
+    e.g., what is the expected GDE score over the ensemble.
+
+    base_model_idx tells us which model will be held out of the set of check models 
+    """
+    with torch.no_grad():
+        predictions = [[] for  _ in model_list]
+        total_correct = 0
+        total_samples = 0
+        target_list = []  
+        for x, y in loader:
+            x = x.cuda()
+            y = y.cuda()
+            for enum, m in enumerate(model_list):
+                pred = m(x).argmax(1)
+                predictions[enum].append(pred)
+                if enum == base_model_idx:
+                    total_correct += pred.eq(y.data).sum().item()
+                    total_samples += len(y)
+                    target_list.append(y)
+        for enum, p in enumerate(predictions):
+            predictions[enum] = torch.cat(p)
+    target_list = torch.cat(target_list).cpu()
+    acc = total_correct / total_samples 
+    """
+    Compute disagreement with all the other models
+    """
+    base_preds= predictions[base_model_idx] 
+    gde_disagreements = []
+    for enum in range(len(model_list)): 
+        if enum != base_model_idx: 
+            check_preds = predictions[enum]
+            gde_disagreements.append(base_preds.eq(check_preds)) 
+    gde_disagreements = torch.stack(gde_disagreements).float().cpu()  # (num models-1) x n {0,1} binary array of GDE predictions
+    """
+    We will average the round-robin disagreement 
+    scores to get a better score for each sample.
+    """
+    return gde_disagreements, predictions[base_model_idx].cpu(),target_list, acc
 
 def main():
     """
@@ -764,7 +811,92 @@ def main():
         }
         header_str = json.dumps(header_dict)
         np.savetxt(file_name,X=arr,delimiter=",",fmt="%.4f",header=header_str) 
-    
+    elif args.predictor.lower() == "voting_v2":
+        if len(args.ckpt) < 2:
+            print("ONLY 1 MODEL PASSED. NOT AN ENSEMBLE. EXITING")
+            exit()
+        num_models = len(args.ckpt)
+        print("=> NUM MODELS: ",num_models)
+        print("=> Base Model Idx: ",args.base_idx)
+
+        model_list = [load_model(args,ckpt) for ckpt in args.ckpt]
+        
+        print()
+        print("=> Computing TARGET DIST Scores ")
+        start_time = time.time()
+        target_disagreements, target_base_preds, target_labels, target_acc = perform_voting_one_vs_one(model_list=model_list,
+            loader=target_loader,
+            base_model_idx=args.base_idx)
+        #the output of the check models is used to determine if we should accept the predictions of the base model.
+        target_scores = torch.mean(target_disagreements,dim=0) 
+        
+        print()
+        print("=> Computing ID DIST Scores ")
+        start_time = time.time()
+        id_disagreements, id_base_preds, id_labels, id_acc = perform_voting_one_vs_one(model_list=model_list,
+            loader=clean_test_loader,
+            base_model_idx=args.base_idx)
+        #the output of the check models is used to determine if we should accept the predictions of the base model.
+        id_scores = torch.mean(id_disagreements,dim=0) 
+        
+        """
+        Compute the threshold
+        """
+        print('=> Computing Threshold')
+        thresholds = np.arange(0, 1, 1/(num_models-1)) 
+        acc_at_thres = []
+        for thres in thresholds:
+            acc_at_thres.append((id_scores >= thres).sum() / len(id_scores))
+        idx = np.abs(np.array(acc_at_thres) - id_acc).argmin()
+        found_thres = np.round(thresholds[idx],4)
+        print("=> Optimal Thres: {0} , ID Thres Acc: {1:.3f}, True ID Acc: {2:.3f}".format(found_thres,acc_at_thres[idx],id_acc))
+        
+        """
+        Get the predicted TARGET DIST ACC using the threshold.
+        """
+        target_scores = np.round(target_scores,4)
+        num_disagreements = len(target_scores[target_scores >= found_thres]) #number of times models did not agree
+        print("=> Num Disagreements (Threshold)! ",num_disagreements)
+        target_ground_truth = target_base_preds.eq(target_labels)
+        pred_target_acc = (num_disagreements / target_labels.shape[0])
+        print("True Target Acc: {0:.3f} -- Pred Thres Acc: {1:.3f}".format(target_acc,pred_target_acc))
+
+        """
+        Save Score and relevant info to txt.
+        """ 
+        consolidated_log_path ="/usr/workspace/trivedi1/Fall2022/icassp23-gengap/pred_logs/consolidated.csv"
+        save_name = "{method}_{save_name}_{corruption}_{severity}_{seed}".format(save_name=args.save_name,
+            corruption=args.corruption,
+            severity=args.severity, 
+            seed=args.seed,
+            method=args.predictor)
+        save_str = "{save_name},{true_target_acc:.4f},{pred_target_acc:.4f}\n".format(save_name=save_name,true_target_acc=target_acc, pred_target_acc=pred_target_acc)
+        with open(consolidated_log_path, "a") as f:
+            f.write(save_str)
+
+        file_name = "{prefix}/{method}_{save_name}_{corruption}_{severity}_{seed}.txt".format(prefix=LOG_PREFIX,
+            save_name=args.save_name,
+            corruption=args.corruption,
+            severity=args.severity, 
+            seed=args.seed,
+            method=args.predictor)
+        #scores, predicted as correct, ground_truth_is_correct_pred, predicted_class, ground_truth_class
+        #arr = np.column_stack((target_scores, target_scores >= found_thres, target_ground_truth,target_vals, target_list))
+        arr = np.column_stack((target_scores, target_scores >= found_thres, target_ground_truth,target_base_preds, target_labels))
+        print("Saving Ens Scores!")
+        print("File Name: {0}".format(file_name))
+        print("Arr Size: ",arr.shape)
+
+        header_dict ={
+            "thres":found_thres,
+            "pred_target_acc":np.round(pred_target_acc,4),
+            "true_target_acc":np.round(target_acc,4),
+            "target_dataset":args.target_dataset,
+            "corruption":args.corruption,
+            "severity":args.severity
+        }
+        header_str = json.dumps(header_dict)
+        np.savetxt(file_name,X=arr,delimiter=",",fmt="%.4f",header=header_str)  
     else:
         print("INVALID PREDICTOR SPECIFIED. EXITING")
         exit()

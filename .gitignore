@@ -5,3 +5,5 @@
 /pred_logs
 /scripts
 /temp_ckpts
+*.tar
+*.ipynb
