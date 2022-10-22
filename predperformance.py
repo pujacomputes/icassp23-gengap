@@ -143,7 +143,7 @@ def arg_parser_eval():
         "--arch",
         type=str,
         default="resnet50",
-        choices=["resnet50", "wrn", "densenet", "resnext", "clip-RN50"],
+        choices=["resnet50", "wrn", "densenet", "resnext", "clip-RN50","resnet18"],
         help="Choose architecture.",
     )
     
@@ -248,9 +248,6 @@ def main():
         clean_test_dataset=clean_test_dataset_c)
     print("=> DONE LOADING ALL DATASETS") 
     _, id_acc = test(net=net, test_loader=clean_test_loader, adv=None)
-    # _, target_acc = test(net=net, test_loader=target_loader, adv=None)
-    # print("=> Clean Acc: ",clean_acc)
-    # print("=> Target Acc: ",target_acc)
 
     if args.predictor.lower() == "lms":
         majority_criteria = 0.5
@@ -376,6 +373,16 @@ def main():
         """
         Save the scores. 
         """
+        consolidated_log_path ="/usr/workspace/trivedi1/Fall2022/icassp23-gengap/pred_logs/consolidated.csv"
+        save_name = "{method}_{save_name}_{corruption}_{severity}_{seed}".format(save_name=args.save_name,
+            corruption=args.corruption,
+            severity=args.severity, 
+            seed=args.seed,
+            method=args.predictor)
+        save_str = "{save_name},{true_target_acc:.4f},{pred_target_acc:.4f}\n".format(save_name=save_name,true_target_acc=target_acc, pred_target_acc=pred_target_acc)
+        with open(consolidated_log_path, "a") as f:
+            f.write(save_str)
+
         header_dict ={
             "thres":found_thres,
             "pred_target_acc":np.round(pred_target_acc.item(),4),
@@ -386,8 +393,10 @@ def main():
             "severity":args.severity
         } 
         arr = np.column_stack((target_scores, target_scores >= found_thres, target_ground_truth,target_preds, target_loader.dataset.targets,target_vals))
-        file_name = "{prefix}/{method}_{save_name}_{seed}.txt".format(prefix=LOG_PREFIX,
-            save_name=args.save_name, 
+        file_name = "{prefix}/{method}_{save_name}_{corruption}_{severity}_{seed}.txt".format(prefix=LOG_PREFIX,
+            save_name=args.save_name,
+            corruption=args.corruption,
+            severity=args.severity, 
             seed=args.seed,
             method=args.predictor)
         print("Saving LMS Scores!")
@@ -424,8 +433,20 @@ def main():
         """
         Save Score and relevant info to txt.
         """ 
-        file_name = "{prefix}/{method}_{save_name}_{seed}.txt".format(prefix=LOG_PREFIX,
-            save_name=args.save_name, 
+        consolidated_log_path ="/usr/workspace/trivedi1/Fall2022/icassp23-gengap/pred_logs/consolidated.csv"
+        save_name = "{method}_{save_name}_{corruption}_{severity}_{seed}".format(save_name=args.save_name,
+            corruption=args.corruption,
+            severity=args.severity, 
+            seed=args.seed,
+            method=args.predictor)
+        save_str = "{save_name},{true_target_acc:.4f},{pred_target_acc:.4f}\n".format(save_name=save_name,true_target_acc=target_acc, pred_target_acc=pred_target_acc)
+        with open(consolidated_log_path, "a") as f:
+            f.write(save_str)
+
+        file_name = "{prefix}/{method}_{save_name}_{corruption}_{severity}_{seed}.txt".format(prefix=LOG_PREFIX,
+            save_name=args.save_name,
+            corruption=args.corruption,
+            severity=args.severity, 
             seed=args.seed,
             method=args.predictor)
         #scores, predicted as correct, ground_truth_is_correct_pred, predicted_class, ground_truth_class
@@ -471,6 +492,7 @@ def main():
         target_list = []
         start_time = time.time()
         with torch.no_grad():
+            target_acc=0
             for enum in range(num_models):
                 counter = 0
                 total_correct = 0
@@ -485,8 +507,10 @@ def main():
                     if enum == 0:
                         target_list.append(targets)
                 acc_tmp = total_correct / len(target_loader.dataset) 
+                target_acc += acc_tmp
                 print("({0}) Collected Models: {1} -- Target List: {2} -- Acc: {3:.3f}".format(np.round(time.time() - start_time,3), enum,counter,acc_tmp))
             target_list = torch.cat(target_list).cpu()
+        target_acc /= num_models
         """
         Compute Agreement over Augmentations
         """
@@ -516,10 +540,10 @@ def main():
                     counter += num_samples 
                     if enum == 0:
                         id_target_list.append(targets)
-                acc_tmp = total_correct / len(clean_test_loader.dataset) 
+                acc_tmp = total_correct / len(clean_test_loader.dataset)
                 print("({0}) Collected Models: {1} -- Target List: {2} -- Acc: {3:.3f}".format(np.round(time.time() - start_time,3), enum,counter,acc_tmp))
             id_target_list = torch.cat(id_target_list).cpu()
-        
+         
         id_vals, id_counts = mode(id_preds,axis=0) 
         id_vals = id_vals.squeeze()
         id_counts = id_counts.squeeze()
@@ -540,6 +564,7 @@ def main():
         """
         Get the predicted TARGET DIST ACC using the threshold.
         """
+        target_scores = np.round(target_scores,4)
         num_disagreements_thres = len(target_scores[target_scores >= found_thres]) #number of times models did not agree
         num_disagreements = len(target_scores [target_scores <= (majority_criteria/num_models)]) #number of times models did not agree
         
@@ -547,7 +572,6 @@ def main():
         print("=> Num Disagreements (Threshold)! ",num_disagreements_thres)
         
         target_ground_truth = torch.Tensor(target_vals).eq(target_list)
-        target_acc = target_ground_truth.sum().item() / len(target_list)
         pred_target_acc = 1 - (num_disagreements / target_list.shape[0])
         pred_target_acc_thres = (num_disagreements_thres / target_list.shape[0])
         print("True Target Acc: {0:.3f} -- Pred Thres Acc: {1:.3f} -- Pred Majority Acc: {2:.3f}".format(target_acc,pred_target_acc_thres,pred_target_acc))
@@ -555,8 +579,20 @@ def main():
         """
         Save Score and relevant info to txt.
         """ 
-        file_name = "{prefix}/{method}_{save_name}_{seed}.txt".format(prefix=LOG_PREFIX,
-            save_name=args.save_name, 
+        consolidated_log_path ="/usr/workspace/trivedi1/Fall2022/icassp23-gengap/pred_logs/consolidated.csv"
+        save_name = "{method}_{save_name}_{corruption}_{severity}_{seed}".format(save_name=args.save_name,
+            corruption=args.corruption,
+            severity=args.severity, 
+            seed=args.seed,
+            method=args.predictor)
+        save_str = "{save_name},{true_target_acc:.4f},{pred_target_acc:.4f}\n".format(save_name=save_name,true_target_acc=target_acc, pred_target_acc=pred_target_acc)
+        with open(consolidated_log_path, "a") as f:
+            f.write(save_str)
+
+        file_name = "{prefix}/{method}_{save_name}_{corruption}_{severity}_{seed}.txt".format(prefix=LOG_PREFIX,
+            save_name=args.save_name,
+            corruption=args.corruption,
+            severity=args.severity, 
             seed=args.seed,
             method=args.predictor)
         #scores, predicted as correct, ground_truth_is_correct_pred, predicted_class, ground_truth_class
