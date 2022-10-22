@@ -48,12 +48,12 @@ from scipy.stats import mode
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 
 LOG_PREFIX="/usr/workspace/trivedi1/Fall2022/icassp23-gengap/pred_logs"
-def get_probs(model, loader): 
+def get_probs(model, loader,return_target_list=False): 
     all_feats = []
     correct = 0
     total = 0
     model.eval()
-
+    target_list = []
     with torch.no_grad():
         for x, y in loader:
             x = x.cuda()
@@ -62,8 +62,13 @@ def get_probs(model, loader):
             all_feats.append(F.softmax(outputs, dim=1).cpu())
             correct += (outputs.argmax(1) == y).sum().item()
             total += y.size(0)
+            if return_target_list:
+                target_list.append(y) 
     acc = correct / total
     all_feats = torch.cat(all_feats)
+    if return_target_list:
+        target_list = torch.cat(target_list).cpu()
+        return all_feats,acc,target_list 
     return all_feats,acc 
 
 def get_probs_thres(model, loader): 
@@ -136,7 +141,7 @@ def arg_parser_eval():
         "--predictor",
         type=str,
         default="lms",
-        choices=["lms", "doc", "ens", "mmd",'voting','voting_v2'],
+        choices=["lms", "doc", "ens", "mmd",'voting','gde'],
         help="Specify the type of predictor",
     )
     parser.add_argument(
@@ -292,6 +297,33 @@ def perform_voting_one_vs_one(model_list, loader,base_model_idx=0):
     """
     return gde_disagreements, predictions[base_model_idx].cpu(),target_list, acc
 
+def get_lms(net,randaug_loader,args):
+    """
+    We expect a dataloader that uses randaugment to get lms scores.
+    There is no shuffling! So we will iterate over the dataset k times
+    to get the local manifold smoothness. 
+    """ 
+    net.eval()
+    lms_preds = torch.zeros(args.num_augs,len(randaug_loader.dataset)) 
+    target_list = []
+    start_time = time.time()
+    print()
+    print("=> Begin LMS.")
+    with torch.no_grad():
+        for enum in range(args.num_augs):
+            counter = 0
+            for images, targets in randaug_loader:
+                images, targets = images.cuda(), targets.cuda()
+                num_samples = len(targets)
+                lms_preds[enum,counter:counter+num_samples]= net(images).data.max(1)[1].cpu() 
+                counter += num_samples 
+                if enum == 0:
+                    target_list.append(targets)
+            print("({0}) Collected Augs: {1}".format(np.round(time.time() - start_time,3),enum))
+        target_list = torch.cat(target_list).cpu()
+    print()
+    return lms_preds, target_list 
+
 def main():
     """
     Load the saved checkpoint.
@@ -352,8 +384,7 @@ def main():
         majority_criteria = 0.5
         #use local manifold smoothing.
         """
-        Change the target dataloader so that randaugment is applied.
-        We will iterate x times over the dataset and compute their votes. 
+        Set-up augmented loaders to get lms.
         """
         lms_transform = get_transform(
         dataset=args.dataset, SELECTED_AUG="randaug", use_clip_mean=use_clip_mean
@@ -372,41 +403,6 @@ def main():
             corruption =args.corruption, 
             severity = args.severity,
             clean_test_dataset=clean_test_dataset_c)
-
-        """
-        there is no shuffling! So we will iterate over the dataset k times
-        to get the local manifold smoothness. 
-        """ 
-        net.eval()
-        lms_preds = torch.zeros(args.num_augs,len(target_loader.dataset)) 
-        target_list = []
-        start_time = time.time()
-        print()
-        print("=> Begin LMS on Target Dist.")
-        with torch.no_grad():
-            for enum in range(args.num_augs):
-                counter = 0
-                for images, targets in target_loader_randaug:
-                    images, targets = images.cuda(), targets.cuda()
-                    num_samples = len(targets)
-                    lms_preds[enum,counter:counter+num_samples]= net(images).data.max(1)[1].cpu() 
-                    counter += num_samples 
-                    if enum == 0:
-                        target_list.append(targets)
-                print("({0}) Target Dist, Collected Augs: {1}".format(np.round(time.time() - start_time,3),enum))
-            target_list = torch.cat(target_list).cpu()
-        print()
-        """
-        Compute Agreement over Augmentations
-        """
-        target_vals, target_counts = mode(lms_preds,axis=0) 
-        target_vals = target_vals.squeeze()
-        target_counts = target_counts.squeeze()
-        target_scores = target_counts / args.num_augs
-
-        """
-        Compute threshold value over the training distribution.
-        """
         _, id_loader_randaug= get_dataloaders(
             args=args,
             train_aug="test",
@@ -414,31 +410,27 @@ def main():
             train_transform=train_transform,
             test_transform=lms_transform,
             use_clip_mean=use_clip_mean,
-        )        
-
-        net.eval()
-        id_lms_preds = torch.zeros(args.num_augs,len(id_loader_randaug.dataset)) 
-        id_target_list = []
-        start_time = time.time()
-        print("=> Begin IN DIST LMS")
-        with torch.no_grad():
-            for enum in range(args.num_augs):
-                counter = 0
-                for images, targets in id_loader_randaug:
-                    images, targets = images.cuda(), targets.cuda()
-                    num_samples = len(targets)
-                    id_lms_preds[enum,counter:counter+num_samples]= net(images).data.max(1)[1].cpu() 
-                    counter += num_samples 
-                    if enum == 0:
-                        id_target_list.append(targets)
-                print("({0}) In Dist, Collected Augs: {1}".format(np.round(time.time() - start_time,3),enum))
-            id_target_list = torch.cat(id_target_list).cpu()
-
-        id_vals, id_counts = mode(id_lms_preds,axis=0) 
+        )   
+        """
+        Target Dist
+        """
+        target_lms_preds, target_labels = get_lms(net=net, randaug_loader=target_loader_randaug,args=args) 
+        target_preds, target_acc = get_probs(model=net, loader=target_loader)
+        target_vals, target_counts = mode(target_lms_preds,axis=0) #get most common predicted class, and number of agreements 
+        target_vals = target_vals.squeeze()
+        target_counts = target_counts.squeeze()
+        target_scores = target_counts / args.num_augs #lms score
+        target_scores = np.round(target_scores,4)
+        
+        """
+        ID Dist
+        """
+        id_lms_preds, id_labels = get_lms(net=net, randaug_loader=id_loader_randaug,args=args) 
+        id_vals, id_counts = mode(id_lms_preds,axis=0) #get most common predicted class, and number of agreements 
         id_vals = id_vals.squeeze()
         id_counts = id_counts.squeeze()
-        id_scores = id_counts / args.num_augs
-
+        id_scores = id_counts / args.num_augs #lms score
+        id_scores = np.round(id_scores,4)
         """
         Compute the threshold
         """
@@ -448,26 +440,15 @@ def main():
             acc_at_thres.append((id_scores >= thres).sum() / len(id_scores))
         idx = np.abs(np.array(acc_at_thres) - id_acc).argmin()
         found_thres = np.round(thresholds[idx],4)
-        print("=> Optimal Thres: {0} , ID Thres Acc: {1:.3f}, True ID Acc: {2:.3f}".format(thresholds[idx],acc_at_thres[idx],id_acc))
+        print("=> Optimal Thres: {0} , ID Thres Acc: {1:.3f}, True ID Acc: {2:.3f}".format(found_thres,acc_at_thres[idx],id_acc))
         
         """
         Get predictions on UNAUGMENTED TARGET Distribution
         """
-        target_preds, target_acc = get_probs(model=net, loader=target_loader)
         target_preds = target_preds.argmax(1)
-        target_ground_truth = target_preds.eq(target_loader.dataset.targets)
-        
-        # WE ALSO GET THE GROUND TRUTH FROM THE MAJORITY CLASS OVER AUGMENTATIONS
-        target_voting_ground_truth = torch.Tensor(target_vals).eq(target_loader.dataset.targets)
-        target_voting_acc = target_voting_ground_truth.sum() / len(target_loader.dataset.targets)
-        
-        """
-        PREDICTING ACCURACY ON TARGET DATASET 
-        """
-        pred_target_acc = (target_scores >= found_thres).sum() / len(target_scores)
-        pred_target_acc_majority = (target_scores >= majority_criteria).sum() / len(target_scores)
-
-        print("True Target Acc: {0:.3f} -- True Voting Acc: {1:.3f} -- Predict LMS Acc Thres : {2:.3f} -- Predict LMS Acc Maj: {3:.3f}".format(target_acc,target_voting_acc,pred_target_acc,pred_target_acc_majority))
+        target_ground_truth = target_preds.eq(target_labels)
+        pred_target_acc = (target_scores >= found_thres).sum().item() / len(target_scores) 
+        print("True Target Acc: {0:.3f} -- Predict LMS Acc : {1:.3f} ".format(target_acc,pred_target_acc))
         
         """
         Save the scores. 
@@ -484,14 +465,13 @@ def main():
 
         header_dict ={
             "thres":found_thres,
-            "pred_target_acc":np.round(pred_target_acc.item(),4),
-            "pred_voting_acc":np.round(target_voting_acc.item(),4),
+            "pred_target_acc":np.round(pred_target_acc,4),
             "target_acc":np.round(target_acc,4),
             "target_dataset":args.target_dataset,
             "corruption":args.corruption,
             "severity":args.severity
         } 
-        arr = np.column_stack((target_scores, target_scores >= found_thres, target_ground_truth,target_preds, target_loader.dataset.targets,target_vals))
+        arr = np.column_stack((target_scores, target_scores >= found_thres, target_ground_truth,target_preds, target_labels,target_vals))
         file_name = "{prefix}/{method}_{save_name}_{corruption}_{severity}_{seed}.txt".format(prefix=LOG_PREFIX,
             save_name=args.save_name,
             corruption=args.corruption,
@@ -507,14 +487,14 @@ def main():
     elif args.predictor.lower() == "doc":
         #use differences of confidences.
         net = load_model(args,args.ckpt[0]) 
-        id_probs ,acc  = get_probs(model=net,loader=clean_test_loader)
+        id_probs ,acc, id_labels  = get_probs(model=net,loader=clean_test_loader,return_target_list=True)
         id_confs = id_probs.max(dim=1)[0]
         id_preds = id_probs.argmax(dim=1)
         
-        target_probs ,target_acc  = get_probs(model=net,loader=target_loader)
+        target_probs, target_acc, target_labels  = get_probs(model=net,loader=target_loader, return_target_list=True)
         scores = target_confs = target_probs.max(dim=1)[0]
         target_preds = target_probs.argmax(dim=1)
-        target_ground_truth = target_preds.eq(target_loader.dataset.targets) 
+        target_ground_truth = target_preds.eq(target_labels) 
         
         """
         Compute the threshold
@@ -526,7 +506,7 @@ def main():
         idx = np.abs(np.array(acc_at_thres) - acc).argmin()
         found_thres = thresholds[idx]
         pred_target_acc = (target_confs >= found_thres).sum() / len(target_confs)
-        print("=> Optimal Thres: {0} , ID Thres Acc: {1:.3f}, True ID Acc: {2:.3f}".format(thresholds[idx],acc_at_thres[idx],acc))
+        print("=> Optimal Thres: {0} , ID Thres Acc: {1:.3f}, True ID Acc: {2:.3f}".format(found_thres,acc_at_thres[idx],acc))
         print("=> True Target Acc: {0:.3f} -- Pred Target Acc: {1:.3f}".format(target_acc,pred_target_acc)) 
         
         """
@@ -549,7 +529,7 @@ def main():
             seed=args.seed,
             method=args.predictor)
         #scores, predicted as correct, ground_truth_is_correct_pred, predicted_class, ground_truth_class
-        arr = np.column_stack((scores, target_confs >= found_thres, target_ground_truth,target_preds, target_loader.dataset.targets))
+        arr = np.column_stack((scores, target_confs >= found_thres, target_ground_truth,target_preds, target_labels))
         print("Saving DOC Scores!")
         print("File Name: {0}".format(file_name))
         print("Arr Size: ",arr.shape)
@@ -811,7 +791,7 @@ def main():
         }
         header_str = json.dumps(header_dict)
         np.savetxt(file_name,X=arr,delimiter=",",fmt="%.4f",header=header_str) 
-    elif args.predictor.lower() == "voting_v2":
+    elif args.predictor.lower() == "gde":
         if len(args.ckpt) < 2:
             print("ONLY 1 MODEL PASSED. NOT AN ENSEMBLE. EXITING")
             exit()
