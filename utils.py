@@ -92,16 +92,17 @@ def get_l2_dist(weight_dict1, weight_dict2, ignore=".fc."):
     return l2_dist
 
 
-def get_oodloader(args, dataset, use_clip_mean=False):
-    if use_clip_mean:
-        normalize = transforms.Normalize(norm_dict["clip_mean"], norm_dict["clip_std"])
-    else:
-        normalize = transforms.Normalize(
-            norm_dict[args.dataset + "_mean"], norm_dict[args.dataset + "_std"]
+def get_oodloader(args, dataset, use_clip_mean=False,transform=None):
+    if transform is None:
+        if use_clip_mean:
+            normalize = transforms.Normalize(norm_dict["clip_mean"], norm_dict["clip_std"])
+        else:
+            normalize = transforms.Normalize(
+                norm_dict[args.dataset + "_mean"], norm_dict[args.dataset + "_std"]
+            )
+        transform = transforms.Compose(
+            [transforms.Resize((224, 224)), transforms.ToTensor(), normalize]
         )
-    transform = transforms.Compose(
-        [transforms.Resize((224, 224)), transforms.ToTensor(), normalize]
-    )
     if dataset.upper() == "STL10":
         ood_dataset = torchvision.datasets.STL10(
             root="/p/lustre1/trivedi1/vision_data",
@@ -442,13 +443,23 @@ def get_dataloaders(
                 transform=train_transform,
             )
             """
-            We are going to replace some of the targets with wrong labels
+            We are going to replace some of the targets with wrong labels.
+
+            Another modification is keeping the random generator the same 
+            for each seed (so only random weight initialization is the source of randomness).
             """
+                 
             targets = np.array(train_dataset.targets)
             num_relabel = int(len(targets) * args.label_noise)
             print("=> RELABELING ~ ",num_relabel)
-            relabel_idx = np.random.choice(a=np.arange(len(targets)),size=num_relabel,replace=False) 
-            relabel_labels = np.random.choice(a=np.arange(10),size=num_relabel,replace=True)
+            if args.seed >= 100:
+                random_state = np.random.RandomState(seed=12345)
+                relabel_idx = random_state.choice(a=np.arange(len(targets)),size=num_relabel,replace=False) 
+                relabel_labels = random_state.choice(a=np.arange(10),size=num_relabel,replace=True)
+                print("=> Using Fixed Seed! ", relabel_idx[0:12])
+            else:
+                relabel_idx = np.random.choice(a=np.arange(len(targets)),size=num_relabel,replace=False) 
+                relabel_labels = np.random.choice(a=np.arange(10),size=num_relabel,replace=True)
             targets[relabel_idx] = relabel_labels
             train_dataset.targets = targets.tolist() 
         elif args.dataset == "cifar100":
@@ -769,7 +780,7 @@ def arg_parser():
     )
 
     parser.add_argument(
-        "--arch", type=str, default="resnet50", choices=["resnet50", "clip-RN50","resnet18"]
+        "--arch", type=str, default="resnet50", choices=["resnet50", "clip-RN50","resnet18","resnet18cifar"]
     )
 
     parser.add_argument(
@@ -1214,7 +1225,7 @@ CBAR_CORRUPTIONS_SEV = {
 
 
 def get_calibration_loader(
-    args, cal_dataset, corruption=None, severity=None, clean_test_dataset=None
+    args, cal_dataset, corruption=None, severity=None, clean_test_dataset=None,transform=None
 ):
     """
     Get different CIFAR10 Calibration datasets
@@ -1281,11 +1292,11 @@ def get_calibration_loader(
             )
         elif cal_dataset == "stl":
             clean_test_loader = get_oodloader(
-                args, dataset="stl10", use_clip_mean=use_clip_mean
+                args, dataset="stl10", use_clip_mean=use_clip_mean,transform=transform
             )
         elif cal_dataset == "cifar10p1":
             clean_test_loader = get_oodloader(
-                args, dataset="cifar10.1", use_clip_mean=use_clip_mean
+                args, dataset="cifar10.1", use_clip_mean=use_clip_mean,transform=transform
             )
     elif args.dataset == "cifar100":
         """

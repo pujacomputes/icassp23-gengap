@@ -137,6 +137,11 @@ def main():
         if args.arch.lower()  == 'resnet18':
             print("=> *** Using UNTRAINED Resnet18 Model!! ***")
             net = timm.create_model(args.arch,pretrained=False)
+        if args.arch.lower()  == 'resnet18cifar':
+            print("=> *** Using UNTRAINED Resnet18 Model --- MODIFIED FIRST CONV!! ***")
+            net = timm.create_model("resnet18",pretrained=False)
+            net.conv1 = torch.nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
+            print(net)
         if 'clip' in args.arch:
             encoder_type = args.arch.split("-")[-1]
             print("\t => Clip Encoder: ",encoder_type)

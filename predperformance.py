@@ -402,7 +402,8 @@ def main():
             cal_dataset = args.target_dataset, 
             corruption =args.corruption, 
             severity = args.severity,
-            clean_test_dataset=clean_test_dataset_c)
+            clean_test_dataset=clean_test_dataset_c,
+            transform=lms_transform)
         _, id_loader_randaug= get_dataloaders(
             args=args,
             train_aug="test",
@@ -459,7 +460,9 @@ def main():
             severity=args.severity, 
             seed=args.seed,
             method=args.predictor)
-        save_str = "{save_name},{true_target_acc:.4f},{pred_target_acc:.4f}\n".format(save_name=save_name,true_target_acc=target_acc, pred_target_acc=pred_target_acc)
+
+        mae_diff = np.abs(target_acc - pred_target_acc) 
+        save_str = "{save_name},{true_target_acc:.4f},{pred_target_acc:.4f},{mae:.4f}\n".format(save_name=save_name,true_target_acc=target_acc, pred_target_acc=pred_target_acc,mae=mae_diff)
         with open(consolidated_log_path, "a") as f:
             f.write(save_str)
 
@@ -518,7 +521,8 @@ def main():
             severity=args.severity, 
             seed=args.seed,
             method=args.predictor)
-        save_str = "{save_name},{true_target_acc:.4f},{pred_target_acc:.4f}\n".format(save_name=save_name,true_target_acc=target_acc, pred_target_acc=pred_target_acc)
+        mae_diff = np.abs(target_acc - pred_target_acc)
+        save_str = "{save_name},{true_target_acc:.4f},{pred_target_acc:.4f},{mae:.4f}\n".format(save_name=save_name,true_target_acc=target_acc, pred_target_acc=pred_target_acc,mae=mae_diff)
         with open(consolidated_log_path, "a") as f:
             f.write(save_str)
 
@@ -664,7 +668,8 @@ def main():
             severity=args.severity, 
             seed=args.seed,
             method=args.predictor)
-        save_str = "{save_name},{true_target_acc:.4f},{pred_target_acc:.4f}\n".format(save_name=save_name,true_target_acc=target_acc, pred_target_acc=pred_target_acc)
+        mae_diff = np.abs(target_acc - pred_target_acc)
+        save_str = "{save_name},{true_target_acc:.4f},{pred_target_acc:.4f},{mae:.4f}\n".format(save_name=save_name,true_target_acc=target_acc, pred_target_acc=pred_target_acc,mae=mae_diff)
         with open(consolidated_log_path, "a") as f:
             f.write(save_str)
 
@@ -764,7 +769,9 @@ def main():
             severity=args.severity, 
             seed=args.seed,
             method=args.predictor)
-        save_str = "{save_name},{true_target_acc:.4f},{pred_target_acc:.4f}\n".format(save_name=save_name,true_target_acc=target_acc, pred_target_acc=pred_target_acc)
+        
+        mae_diff = np.abs(target_acc - pred_target_acc)
+        save_str = "{save_name},{true_target_acc:.4f},{pred_target_acc:.4f},{mae:.4f}\n".format(save_name=save_name,true_target_acc=target_acc, pred_target_acc=pred_target_acc,mae=mae_diff)
         with open(consolidated_log_path, "a") as f:
             f.write(save_str)
 
@@ -845,12 +852,14 @@ def main():
         Save Score and relevant info to txt.
         """ 
         consolidated_log_path ="/usr/workspace/trivedi1/Fall2022/icassp23-gengap/pred_logs/consolidated.csv"
-        save_name = "{method}_{save_name}_{corruption}_{severity}_{seed}".format(save_name=args.save_name,
+        save_name = "{method}-{base_idx}_{save_name}_{corruption}_{severity}_{seed}".format(save_name=args.save_name,
+            base_idx=args.base_idx,
             corruption=args.corruption,
             severity=args.severity, 
             seed=args.seed,
             method=args.predictor)
-        save_str = "{save_name},{true_target_acc:.4f},{pred_target_acc:.4f}\n".format(save_name=save_name,true_target_acc=target_acc, pred_target_acc=pred_target_acc)
+        mae_diff = np.abs(target_acc - pred_target_acc)
+        save_str = "{save_name},{true_target_acc:.4f},{pred_target_acc:.4f},{mae:.4f}\n".format(save_name=save_name,true_target_acc=target_acc, pred_target_acc=pred_target_acc,mae=mae_diff)
         with open(consolidated_log_path, "a") as f:
             f.write(save_str)
 
