@@ -13,12 +13,14 @@ from cifar10p1 import CIFAR10p1
 import domainnet
 from breeds import Breeds, Breeds_C
 from wilds_dataset import WILDS_Dataset
+from PIL import ImageFilter, Image
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 NUM_CLASSES_DICT = {
     "cifar10": 10,
     "cifar10ln": 10,
+    "cifar10gblur": 10,
     "cifar100": 100,
     "living17": 17,
     "entity30": 30,
@@ -40,6 +42,8 @@ norm_dict = {
     "cifar10_std": [0.228, 0.224, 0.225],
     "cifar10ln_mean": [0.485, 0.456, 0.406],
     "cifar10ln_std": [0.228, 0.224, 0.225],
+    "cifar10gblur_mean": [0.485, 0.456, 0.406],
+    "cifar10gblur_std": [0.228, 0.224, 0.225],
     "mnist_mean": [0.485, 0.456, 0.406],
     "mnist_std": [0.228, 0.224, 0.225],
     "living17_mean": [0.485, 0.456, 0.406],
@@ -462,6 +466,29 @@ def get_dataloaders(
                 relabel_labels = np.random.choice(a=np.arange(10),size=num_relabel,replace=True)
             targets[relabel_idx] = relabel_labels
             train_dataset.targets = targets.tolist() 
+        elif args.dataset.lower() == "cifar10gblur":
+            train_dataset = torchvision.datasets.CIFAR10(
+                root="/p/lustre1/trivedi1/vision_data",
+                train=True,
+                transform=train_transform,
+            )
+            to_pi = torchvision.transforms.ToPILImage()
+            to_tensor = torchvision.transforms.ToTensor()
+            random_state = np.random.RandomState(seed=12345)
+            def corrupt_image(image):
+                blurred = Image.fromarray(image).filter(ImageFilter.GaussianBlur(radius=0.5))
+                blurred =  to_tensor(blurred)
+                ch, row,col= blurred.shape
+                mean = 0
+                var = 0.005
+                sigma = var**0.5
+                gauss = random_state.normal(mean,sigma,(ch, row,col))
+                noisy =blurred + gauss
+                corrupted =to_pi(noisy)
+                return corrupted
+            #blurring and addition gaussian noise
+            for i in tqdm.tqdm(range(len(train_dataset))):
+                train_dataset.data[i] = corrupt_image(train_dataset.data[i])
         elif args.dataset == "cifar100":
             train_dataset = torchvision.datasets.CIFAR100(
                 root="/p/lustre1/trivedi1/vision_data",
@@ -751,6 +778,7 @@ def arg_parser():
         choices=[
             "cifar10",
             "cifar10ln",
+            "cifar10gblur",
             "domainnet-sketch",
             "cifar100",
             "pairedCIFAR",
