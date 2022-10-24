@@ -1341,7 +1341,7 @@ def get_calibration_loader(
     Get different CIFAR10 Calibration datasets
     """
     use_clip_mean = "clip" in args.arch
-    if args.dataset == "cifar10":
+    if args.dataset == "cifar10" or args.dataset == "cifar10ln":
         if cal_dataset == "id-c":
             """
             Load cifar10-c

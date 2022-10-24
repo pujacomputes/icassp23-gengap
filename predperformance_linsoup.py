@@ -17,6 +17,7 @@ save the "sample wise" confidence scores
 3. Adversarial Attacks
 4. Anamoly Detection
 """
+import math
 import os
 import random
 from re import I
@@ -96,9 +97,6 @@ def test(net, test_loader, adv=None):
     with torch.no_grad():
         for images, targets in test_loader:
             images, targets = images.cuda(), targets.cuda()
-            # adversarial
-            if adv:
-                images = adv(net, images, targets)
             logits = net(images)
             loss = F.cross_entropy(logits, targets)
             pred = logits.data.max(1)[1]
@@ -126,7 +124,7 @@ def arg_parser_eval():
         "--dataset",
         type=str,
         default="cifar10",
-        choices=["cifar10", "cifar100", "domainnet-sketch", "living17"],
+        choices=["cifar10", "cifar100", "domainnet-sketch", "living17","cifar10ln"],
         help="Choose ID dataset",
     )
     
@@ -159,12 +157,16 @@ def arg_parser_eval():
     parser.add_argument(
         "--eval_batch_size", default=128, type=int, help="Eval Batchsize"
     )
+    parser.add_argument("--learning_rate", default=1.0, type=float, help="Label Noise GDECLS")
+    parser.add_argument("--decay", default=0.0001, type=float, help="Label Noise GDECLS")
+    parser.add_argument("--momentum", default=0.9, type=float, help="Label Noise GDECLS")
     parser.add_argument("--batch_size", default=128, type=int, help="Train Batchsize")
     parser.add_argument("--epochs", default=200, type=int, help="CLS Epochs")
     parser.add_argument("--num_augs", default=10, type=int, help="Num Augs for LMS")
     parser.add_argument("--num_workers", default=8, type=int, help="Num Workers")
     parser.add_argument("--prefetch", action="store_true", help="Prefetch Ood Loader")
-    
+    parser.add_argument("--use_bias", action="store_true")
+    parser.add_argument("--no_bias", dest="use_bias", action="store_false") 
     parser.add_argument(
         "--cal_datasets",
         nargs="*",
@@ -180,6 +182,9 @@ def arg_parser_eval():
     parser.add_argument("--severity", default=5, type=int, help="severity, Used for Getting CIFAR10-C")
     parser.add_argument("--base_idx", default=0, type=int, help="Hold out model for GDE")
     parser.add_argument("--num_cls", default=10, type=int, help="Num Noisy CLS for Soup")
+    parser.add_argument("--label_noise", default=0.02, type=float, help="Label Noise GDECLS")
+    parser.add_argument("--cls_label_noise", default=0.02, type=float, help="Label Noise GDECLS")
+
     args = parser.parse_args()
     return args
 
@@ -271,7 +276,10 @@ def perform_voting_one_vs_one_clfs(net, clf_list, loader,base_clf_idx=0):
         for x, y in loader:
             x = x.cuda()
             y = y.cuda()
-            pen = net(x)
+            pen = torch.nn.functional.adaptive_avg_pool2d(
+                net.forward_features(x), 1
+            )
+            pen = torch.squeeze(pen)
             for enum, clf in enumerate(clf_list):
                 pred = clf(pen).argmax(1)
                 predictions[enum].append(pred)
@@ -410,7 +418,7 @@ def extract_features(args, model, loader, train_aug, train_transform):
     labels = []
     model.eval()
     with torch.no_grad():
-        for data, targets in tqdm.tqdm(loader, disable=True):
+        for data, targets in tqdm(loader, disable=True):
             data = data.cuda()
             if transform:
                 if train_aug in ["cutmix", "mixup"]:
@@ -427,7 +435,7 @@ def extract_features(args, model, loader, train_aug, train_transform):
             if args.arch == "resnet18":
                 # using a timm model. called the
                 reps = torch.nn.functional.adaptive_avg_pool2d(
-                    model.module.forward_features(data), 1
+                    model.forward_features(data), 1
                 )
                 features.append(reps.detach().cpu().numpy())
                 labels.append(targets.detach().cpu().numpy())
@@ -440,6 +448,37 @@ def extract_features(args, model, loader, train_aug, train_transform):
     features = np.squeeze(np.concatenate(features))
     labels = np.concatenate(labels)
     return features, labels
+def create_sparse_clfs(classifier_pool):
+    num_dims = classifier_pool[0].weight.data.shape[1]
+    sparsity_feats = num_dims // len(classifier_pool) 
+    num_classes = classifier_pool[0].weight.data.shape[0]
+    for enum, cls in enumerate(classifier_pool):
+        """
+        if we are at the end of the classifiers, 
+        then we will just let the classifier use a few extra features.
+        """
+
+        start_idx = enum * sparsity_feats
+
+        if enum == len(classifier_pool)-1:
+            end_idx = cls.weight.data.shape[1]
+
+        else:
+            end_idx = (enum+1) * sparsity_feats
+
+        """
+        Now, set all weights to 0, and then replace specified indices, with these values. 
+        """
+
+        with torch.no_grad():
+            empty = torch.zeros(num_classes,end_idx -start_idx)
+            torch.nn.init.kaiming_uniform_(empty, a=math.sqrt(5))
+            torch.nn.init.constant_(cls.weight.data,0.0)
+            cls.weight[:,start_idx:end_idx] = empty
+            assert empty.norm(), cls.weight.norm()
+            # print(enum, start_idx, end_idx,np.round(cls.weight.norm().cpu().numpy(),4))
+    return classifier_pool
+
 
 def linear_probe_soup(args, net, train_loader,test_loader, train_aug, train_transform):
     net.eval()
@@ -455,9 +494,17 @@ def linear_probe_soup(args, net, train_loader,test_loader, train_aug, train_tran
     Training each classifer separately on a different noise instance of the data. 
     """
     classifier_pool = [torch.nn.Linear(train_features.shape[1],NUM_CLASSES_DICT[args.dataset],bias=args.use_bias).to(DEVICE) for _ in range(args.num_cls)]
-    norms = [c.weight.norm() for c in classifier_pool]
+    with torch.no_grad():
+        print("Pre Sparse Classifier Inits: ",[np.round(c.weight.data.norm().data.item(),4) for c in classifier_pool])
+    classifier_pool = create_sparse_clfs(classifier_pool=classifier_pool)
+    with torch.no_grad():
+        print("Sparsified: ",[np.round(c.weight.data.norm().data.item(),4) for c in classifier_pool])
+    
+    with torch.no_grad():
+        norms = [c.weight.norm() for c in classifier_pool]
     print("=> Untrained Clf Norms: ",norms)
-    num_relabel = len(train_labels) * args.label_noise
+    num_relabel = int(len(train_labels) * args.cls_label_noise)
+    print("=> Num Relabeled: ",num_relabel)
     for enum,clf in enumerate(classifier_pool):
         print("Training Clf: , ", enum)
         """
@@ -474,7 +521,7 @@ def linear_probe_soup(args, net, train_loader,test_loader, train_aug, train_tran
         Set-up training
         """ 
         optimizer = torch.optim.SGD(
-            net.clf.parameters(),
+            clf.parameters(),
             args.learning_rate,
             momentum=args.momentum,
             weight_decay=args.decay,
@@ -482,7 +529,7 @@ def linear_probe_soup(args, net, train_loader,test_loader, train_aug, train_tran
 
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer,
-            T_max = args.ft_epochs,
+            T_max = args.epochs,
         )
         criterion = torch.nn.CrossEntropyLoss()
         for epochs in range(args.epochs):
@@ -496,15 +543,19 @@ def linear_probe_soup(args, net, train_loader,test_loader, train_aug, train_tran
                 optimizer.step()
                 scheduler.step()
                 loss_avg += loss 
-            _,train_acc = test(clf, rep_train_dataloader,args) 
-            _,test_acc = test(clf, rep_test_dataloader,args) 
-            print("Clf: {0} -- Train Acc: {1:.3f} -- Test Acc:{2:.3f}".format(enum,train_acc,test_acc))
+            train_loss,train_acc = test(clf, rep_train_dataloader) 
+            _,test_acc = test(clf, rep_test_dataloader) 
+            print("Clf: {0} -- Train Acc: {1:.3f} -- Test Acc:{2:.3f} -- Train Loss:{3:.3f}".format(enum,train_acc,test_acc,train_loss))
 
         print("="*30)
+        # net.fc = clf
+        # train_loss,train_acc = test(net, train_loader) 
+        # _,test_acc = test(net, test_loader) 
         print("Finished Training Clf: {0}, Final Train: {1:.3f}, Final Test: {2:.3f}".format(enum, train_acc, test_acc))
         print("="*30)
         del rep_train_dataset,rep_train_dataloader,optimizer, scheduler 
-    norms = [c.weight.norm() for c in classifier_pool]
+    with torch.no_grad():
+        norms = [c.weight.norm().data for c in classifier_pool]
     print("=> Trained Clf Norms: ",norms)
 
     """
@@ -566,25 +617,30 @@ def main():
         severity = args.severity,
         clean_test_dataset=clean_test_dataset_c)
     print("=> DONE LOADING ALL DATASETS") 
-    _, id_acc = test(net=net, test_loader=clean_test_loader, adv=None)
-    _, target_acc = test(net=net, test_loader=target_loader, adv=None)
+    # _, id_acc = test(net=net, test_loader=clean_test_loader, adv=None)
+    # _, target_acc = test(net=net, test_loader=target_loader, adv=None)
 
    
     if args.predictor.lower() == "gde-cls":
-        if len(args.ckpt) < 2:
+        if args.num_cls < 2:
             print("ONLY 1 MODEL PASSED. NOT AN ENSEMBLE. EXITING")
             exit()
-        num_cls = len(args.num_cls)
-        print("=> NUM CLS: ",num_cls)
+        print("=> NUM CLS: ",args.num_cls)
         print("=> Base cls idx: ",args.base_idx) #irrelevant
 
         net = load_model(args,args.ckpt[0])
-        clf_soup = linear_probe_soup(args, net, clean_train_loader ,clean_train_loader, "test", test_transform) 
-        id_disagreements, id_base_preds, id_labels, id_acc =perform_voting_one_vs_one_clfs(net, clf_list=clf_soup, loader=clean_test_loader,base_clf_idx=0)
+        clf_soup = linear_probe_soup(args, net, clean_train_loader, clean_test_loader, "test", test_transform) 
+        id_disagreements, id_base_preds, id_labels, id_acc =perform_voting_one_vs_one_clfs(net, 
+            clf_list=clf_soup, 
+            loader=clean_test_loader,
+            base_clf_idx=0)
         id_scores = torch.mean(id_disagreements,dim=0) 
         id_scores = np.round(id_scores,4) 
         
-        target_disagreements, target_base_preds, target_labels, target_acc =perform_voting_one_vs_one_clfs(net, clf_list=clf_soup, loader=target_loader,base_clf_idx=0)
+        target_disagreements, target_base_preds, target_labels, target_acc =perform_voting_one_vs_one_clfs(net, 
+            clf_list=clf_soup, 
+            loader=target_loader,
+            base_clf_idx=0)
         target_scores = torch.mean(target_disagreements,dim=0) 
         target_scores = np.round(target_scores,4) 
   
@@ -592,7 +648,7 @@ def main():
         Compute the threshold
         """
         print('=> Computing Threshold')
-        thresholds = np.arange(0, 1, 1/(num_cls-1)) 
+        thresholds = np.arange(0, 1, 1/(args.num_cls-1)) 
         acc_at_thres = []
         for thres in thresholds:
             acc_at_thres.append((id_scores >= thres).sum() / len(id_scores))
@@ -613,13 +669,14 @@ def main():
         Save Score and relevant info to txt.
         """ 
         consolidated_log_path ="/usr/workspace/trivedi1/Fall2022/icassp23-gengap/pred_logs/consolidated.csv"
-        save_name = "{method}-{base_idx}-{num_models}_{save_name}_{corruption}_{severity}_{seed}".format(save_name=args.save_name,
+        save_name = "{method}-{base_idx}-{num_models}_{label_noise}_{save_name}_{corruption}_{severity}_{seed}".format(save_name=args.save_name,
             base_idx=args.base_idx,
             corruption=args.corruption,
             severity=args.severity, 
             seed=args.seed,
             method=args.predictor,
-            num_models=num_cls)
+            label_noise=args.cls_label_noise,
+            num_models=args.num_cls)
         print("=>Save Name: ",save_name)
         # print("=> ENS ID Acc: ",np.round(ens_acc_id,4)) 
         # print("=> ENS Target Acc: ",np.round(ens_acc_target,4))
