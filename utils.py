@@ -21,6 +21,7 @@ NUM_CLASSES_DICT = {
     "cifar10": 10,
     "cifar10ln": 10,
     "cifar10gblur": 10,
+    "cifar10mr": 10,
     "cifar100": 100,
     "living17": 17,
     "entity30": 30,
@@ -44,6 +45,8 @@ norm_dict = {
     "cifar10ln_std": [0.228, 0.224, 0.225],
     "cifar10gblur_mean": [0.485, 0.456, 0.406],
     "cifar10gblur_std": [0.228, 0.224, 0.225],
+    "cifar10mr_mean": [0.485, 0.456, 0.406],
+    "cifar10mr_std": [0.228, 0.224, 0.225],
     "mnist_mean": [0.485, 0.456, 0.406],
     "mnist_std": [0.228, 0.224, 0.225],
     "living17_mean": [0.485, 0.456, 0.406],
@@ -489,6 +492,35 @@ def get_dataloaders(
             #blurring and addition gaussian noise
             for i in tqdm.tqdm(range(len(train_dataset))):
                 train_dataset.data[i] = corrupt_image(train_dataset.data[i])
+        elif args.dataset == "cifar10mr":
+
+            train_dataset = torchvision.datasets.CIFAR10(
+                root="/p/lustre1/trivedi1/vision_data",
+                train=True,
+                transform=train_transform,
+            )
+            targets = np.array(train_dataset.targets)
+            idx_auto = np.argwhere(targets == 1).squeeze()
+            idx_bird = np.argwhere(targets == 2).squeeze()
+            num_class = len(idx_auto)
+            drop_num = int(num_class * 0.2)
+            
+            if args.seed >= 100:
+                random_state = np.random.RandomState(seed=12345)
+                idx_retain = random_state.choice(a=np.arange(num_class),size=drop_num,replace=False) 
+            else:
+                idx_retain = np.random.choice(a=np.arange(num_class),size=drop_num,replace=False) 
+            sub_idx_auto = idx_auto[idx_retain]
+            sub_idx_bird = idx_bird[idx_retain]
+            dropping_idxs = sub_idx_auto.tolist() + sub_idx_bird.tolist()
+            
+            cleaned_data = np.delete(train_dataset.data, dropping_idxs,axis=0)
+            cleaned_targets = np.delete(targets,dropping_idxs).tolist()
+
+            train_dataset.data = cleaned_data
+            train_dataset.targets = cleaned_targets
+
+        
         elif args.dataset == "cifar100":
             train_dataset = torchvision.datasets.CIFAR100(
                 root="/p/lustre1/trivedi1/vision_data",
@@ -566,7 +598,7 @@ def get_dataloaders(
             train_dataset = torchvision.datasets.CIFAR10(
                 root="/p/lustre1/trivedi1/vision_data",
                 train=True,
-                transform=train_transform,
+                transform=normalize,
             )
             """
             We are going to replace some of the targets with wrong labels
@@ -578,6 +610,55 @@ def get_dataloaders(
             relabel_labels = np.random.choice(a=np.arange(10),size=num_relabel,replace=True)
             targets[relabel_idx] = relabel_labels
             train_dataset.targets = targets.tolist() 
+        elif args.dataset.lower() == "cifar10gblur":
+            train_dataset = torchvision.datasets.CIFAR10(
+                root="/p/lustre1/trivedi1/vision_data",
+                train=True,
+                transform=normalize,
+            )
+            to_pi = torchvision.transforms.ToPILImage()
+            to_tensor = torchvision.transforms.ToTensor()
+            random_state = np.random.RandomState(seed=12345)
+            def corrupt_image(image):
+                blurred = Image.fromarray(image).filter(ImageFilter.GaussianBlur(radius=0.5))
+                blurred =  to_tensor(blurred)
+                ch, row,col= blurred.shape
+                mean = 0
+                var = 0.005
+                sigma = var**0.5
+                gauss = random_state.normal(mean,sigma,(ch, row,col))
+                noisy =blurred + gauss
+                corrupted =to_pi(noisy)
+                return corrupted
+            #blurring and addition gaussian noise
+            for i in tqdm.tqdm(range(len(train_dataset))):
+                train_dataset.data[i] = corrupt_image(train_dataset.data[i]) 
+        elif args.dataset == "cifar10mr":
+            train_dataset = torchvision.datasets.CIFAR10(
+                root="/p/lustre1/trivedi1/vision_data",
+                train=True,
+                transform=normalize,
+            )
+            targets = np.array(train_dataset.targets)
+            idx_auto = np.argwhere(targets == 1).squeeze()
+            idx_bird = np.argwhere(targets == 2).squeeze()
+            num_class = len(idx_auto)
+            drop_num = int(num_class * 0.2)
+            
+            if args.seed >= 100:
+                random_state = np.random.RandomState(seed=12345)
+                idx_retain = random_state.choice(a=np.arange(num_class),size=drop_num,replace=False) 
+            else:
+                idx_retain = np.random.choice(a=np.arange(num_class),size=drop_num,replace=False) 
+            sub_idx_auto = idx_auto[idx_retain]
+            sub_idx_bird = idx_bird[idx_retain]
+            dropping_idxs = sub_idx_auto.tolist() + sub_idx_bird.tolist()
+            
+            cleaned_data = np.delete(train_dataset.data, dropping_idxs,axis=0)
+            cleaned_targets = np.delete(targets,dropping_idxs).tolist()
+
+            train_dataset.data = cleaned_data
+            train_dataset.targets = cleaned_targets 
         elif args.dataset == "cifar100":
             train_dataset = torchvision.datasets.CIFAR100(
                 root="/p/lustre1/trivedi1/vision_data", train=True, transform=normalize
@@ -627,7 +708,7 @@ def get_dataloaders(
     """
     Create Test Dataloaders.
     """
-    if args.dataset == "cifar10" or args.dataset  == 'cifar10ln':
+    if args.dataset == "cifar10" or args.dataset  == 'cifar10ln' or args.dataset  == 'cifar10gblur' or args.dataset  == 'cifar10mr':
         test_dataset = torchvision.datasets.CIFAR10(
             root="/p/lustre1/trivedi1/vision_data",
             train=False,
@@ -779,6 +860,7 @@ def arg_parser():
             "cifar10",
             "cifar10ln",
             "cifar10gblur",
+            "cifar10mr",
             "domainnet-sketch",
             "cifar100",
             "pairedCIFAR",
