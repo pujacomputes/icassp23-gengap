@@ -1,14 +1,14 @@
-dataset: MNIST
-num_workers: 1
+dataset: GOODCMNIST-covariate
+num_workers: 4
 model:
   name: GraphMLPMixer
   gnn_type: GINEConv
   nlayer_gnn: 4
   nlayer_mlpmixer: 4
 train:
-  runs: 4
+  runs: 1
   lr_patience: 50
-  epochs: 200
+  epochs: 1
 metis:
   n_patches: 32
 pos_enc:

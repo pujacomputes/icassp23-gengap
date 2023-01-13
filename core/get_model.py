@@ -10,7 +10,7 @@ def create_model(cfg):
         nfeat_edge = 4
         nout = 1  # regression
 
-    elif cfg.dataset == 'MNIST' or cfg.dataset == 'CIFAR10':
+    elif cfg.dataset == 'MNIST' or 'GOODCMNIST' in cfg.dataset or cfg.dataset == 'CIFAR10':
         node_type = 'Linear'
         edge_type = 'Discrete'
         nfeat_node = 5 if cfg.dataset == 'CIFAR10' else 3

@@ -13,7 +13,8 @@ from core.data_utils.exp import PlanarSATPairsDataset
 
 from core.config import cfg, update_cfg
 import numpy as np
-
+from GOOD.data import good_cmnist 
+import pdb
 
 def calculate_stats(dataset):
     num_graphs = len(dataset)
@@ -92,6 +93,20 @@ def create_dataset(cfg):
             root, cfg.dataset, split='val', pre_transform=pre_transform, transform=transform_eval)
         test_dataset = GNNBenchmarkDataset(
             root, cfg.dataset, split='test', pre_transform=pre_transform, transform=transform_eval)
+    
+    elif cfg.dataset == 'GOODCMNIST-concept':
+        generate=True
+        # pre_transform=None
+        # pdb.set_trace()
+        train_dataset = good_cmnist.GOODCMNIST(root="/home/pujat/data", domain="color", shift="concept", subset='train', generate=generate,pre_transform=pre_transform,transform=transform_train)
+        val_dataset = good_cmnist.GOODCMNIST(root="/home/pujat/data", domain="color", shift="concept", subset='id_val', generate=generate,pre_transform=pre_transform,transform=transform_eval)
+        test_dataset = good_cmnist.GOODCMNIST(root="/home/pujat/data", domain="color", shift="concept", subset='id_test', generate=generate,pre_transform=pre_transform,transform=transform_eval)
+    
+    elif cfg.dataset == 'GOODCMNIST-covariate':
+        generate=True
+        train_dataset = good_cmnist.GOODCMNIST(root="/home/pujat/data", domain="color", shift="covariate", subset='train', generate=generate,pre_transform=pre_transform,transform=transform_train)
+        val_dataset = good_cmnist.GOODCMNIST(root="/home/pujat/data", domain="color", shift="covariate", subset='id_val', generate=generate,pre_transform=pre_transform,transform=transform_eval)
+        test_dataset = good_cmnist.GOODCMNIST(root="/home/pujat/data", domain="color", shift="covariate", subset='id_test', generate=generate,pre_transform=pre_transform,transform=transform_eval)
 
     elif 'ogbg' in cfg.dataset:
         from ogb.graphproppred import PygGraphPropPredDataset
@@ -166,15 +181,108 @@ def create_dataset(cfg):
 
     return train_dataset, val_dataset, test_dataset
 
+def create_dataset_good(cfg):
+    pre_transform = PositionalEncodingTransform(
+        rw_dim=cfg.pos_enc.rw_dim, lap_dim=cfg.pos_enc.lap_dim)
+
+    transform_train = transform_eval = None
+
+    if cfg.metis.n_patches > 0:
+        # metis partition
+        if cfg.metis.enable:
+            _transform_train = MetisPartitionTransform(n_patches=cfg.metis.n_patches,
+                                                       drop_rate=cfg.metis.drop_rate,
+                                                       num_hops=cfg.metis.num_hops,
+                                                       is_directed=cfg.dataset == 'TreeDataset')
+
+            _transform_eval = MetisPartitionTransform(n_patches=cfg.metis.n_patches,
+                                                      drop_rate=0.0,
+                                                      num_hops=cfg.metis.num_hops,
+                                                      is_directed=cfg.dataset == 'TreeDataset')
+        # random partition
+        else:
+            _transform_train = RandomPartitionTransform(
+                n_patches=cfg.metis.n_patches, num_hops=cfg.metis.num_hops)
+            _transform_eval = RandomPartitionTransform(
+                n_patches=cfg.metis.n_patches, num_hops=cfg.metis.num_hops)
+        transform_train = _transform_train
+        transform_eval = _transform_eval
+
+
+    if cfg.dataset == 'GOODCMNIST-concept':
+        generate=False
+        train_dataset = good_cmnist.GOODCMNIST(root="/home/pujat/data",
+            domain="color", 
+            shift="concept", 
+            subset='train', 
+            generate=generate,
+            pre_transform=pre_transform,
+            transform=transform_train)
+        eval_train_dataset = good_cmnist.GOODCMNIST(root="/home/pujat/data",
+            domain="color", 
+            shift="concept", 
+            subset='train', 
+            generate=generate,
+            pre_transform=pre_transform,
+            transform=transform_eval)
+        id_val_dataset = good_cmnist.GOODCMNIST(root="/home/pujat/data", domain="color", shift="concept", subset='id_val', generate=generate,pre_transform=pre_transform,transform=transform_eval)
+        id_test_dataset = good_cmnist.GOODCMNIST(root="/home/pujat/data", domain="color", shift="concept", subset='id_test', generate=generate,pre_transform=pre_transform,transform=transform_eval)
+        val_dataset = good_cmnist.GOODCMNIST(root="/home/pujat/data",
+            domain="color", 
+            shift="concept", 
+            subset='val', 
+            generate=generate,
+            pre_transform=pre_transform,
+            transform=transform_eval)
+        test_dataset = good_cmnist.GOODCMNIST(root="/home/pujat/data",
+            domain="color", 
+            shift="concept", 
+            subset='test', 
+            generate=generate,
+            pre_transform=pre_transform,
+            transform=transform_eval)
+    
+    elif cfg.dataset == 'GOODCMNIST-covariate':
+        train_dataset = good_cmnist.GOODCMNIST(root="/home/pujat/data", domain="color", shift="covariate", subset='train', generate=generate,pre_transform=pre_transform,transform=transform_train)
+        eval_train_dataset = good_cmnist.GOODCMNIST(root="/home/pujat/data", domain="color", shift="covariate", subset='train', generate=generate,pre_transform=pre_transform,transform=transform_eval)
+        
+        id_val_dataset = good_cmnist.GOODCMNIST(root="/home/pujat/data", domain="color", shift="covariate", subset='id_val', generate=generate,pre_transform=pre_transform,transform=transform_eval)
+        id_test_dataset = good_cmnist.GOODCMNIST(root="/home/pujat/data", domain="color", shift="covariate", subset='id_test', generate=generate,pre_transform=pre_transform,transform=transform_eval)
+        
+        val_dataset = good_cmnist.GOODCMNIST(root="/home/pujat/data", domain="color", shift="covariate", subset='val', generate=generate,pre_transform=pre_transform,transform=transform_eval)
+        test_dataset = good_cmnist.GOODCMNIST(root="/home/pujat/data", domain="color", shift="covariate", subset='test', generate=generate,pre_transform=pre_transform,transform=transform_eval)
+        print('------------Train--------------')
+        calculate_stats(train_dataset)
+        print('------------Validation--------------')
+        calculate_stats(val_dataset)
+        print('------------Test--------------')
+        calculate_stats(test_dataset)
+        print('------------------------------')
+        return train_dataset, val_dataset, test_dataset
+    else:
+        print("Dataset not supported.")
+        exit(1)
+
+    torch.set_num_threads(cfg.num_workers)
+    if not cfg.metis.online:
+        train_dataset = [x for x in train_dataset]
+    val_dataset = [x for x in val_dataset]
+    test_dataset = [x for x in test_dataset]
+    id_val_dataset = [x for x in id_val_dataset]
+    id_test_dataset = [x for x in id_test_dataset]
+    eval_train_dataset = [x for x in eval_train_dataset]
+
+    return eval_train_dataset,id_val_dataset, id_test_dataset, val_dataset, test_dataset 
+
 
 if __name__ == '__main__':
     print("Generating data")
 
-    cfg.merge_from_file('train/configs/molhiv.yaml')
+    cfg.merge_from_file('/home/pujat/Winter2023/Graph-MLPMixer/train/configs/GraphMLPMixer/goodmnist-concept.yaml')
     cfg = update_cfg(cfg)
     cfg.metis.n_patches = 0
     train_dataset, val_dataset, test_dataset = create_dataset(cfg)
-
+    print(train_dataset[0])
     if cfg.dataset == 'CSL' or cfg.dataset == 'exp-classify':
         print('------------Dataset--------------')
         calculate_stats(train_dataset)
